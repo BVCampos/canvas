@@ -2,6 +2,8 @@
 
 Agent-agnostic multiplayer editor for HTML decks. Each slide can be owned by a user; Codex, Claude Code, or another MCP-compatible agent proposes edits as diffs the team reviews. Threaded comments and slide locks keep parallel work coherent. Canvas is standalone with its own Supabase project and auth; see [ADR-0004](docs/adr/0004-canvas-standalone.md) for the split and [ADR-0009](docs/adr/0009-agent-agnostic-clients.md) for the client model.
 
+![The Canvas editor: slide list on the left, live preview in the center, Ask-agent panel on the right](docs/canvas-editor.png)
+
 - **Why this exists, in one screen:** [DESIGN.md](DESIGN.md)
 - **Canonical vocabulary (Deck, Slide, Edit, Snapshot, MCP Token, …):** [CONTEXT.md](CONTEXT.md)
 - **Schema:** [app/supabase/migrations/](app/supabase/migrations/) (sequential; 0000 is the workspace tenancy foundation, 0001+ are Canvas-specific)
