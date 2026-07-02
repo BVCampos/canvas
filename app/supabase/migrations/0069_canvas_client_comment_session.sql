@@ -1,0 +1,27 @@
+-- ============================================================
+-- 0069 — per-guest scoping for client comments on the public link.
+--
+-- A single /p/{token} link is often sent to several recipients. Before
+-- this, the public read route returned EVERY client-rooted thread on the
+-- deck to any link holder, so each guest could read the others' names and
+-- candid feedback. This column partitions those threads by an opaque,
+-- client-minted session key so a guest sees only their OWN threads (plus
+-- the team's replies to them).
+--
+-- What client_session IS: a privacy-by-default partition between the
+-- anonymous recipients of the same link. The public GET route filters
+-- roots by author_kind='client' AND client_session = <the caller's key>;
+-- a row whose client_session is NULL matches nobody on that surface.
+--
+-- What it is NOT: an authorization boundary. The key is minted and held by
+-- the browser (localStorage), never verified, and trivially forgeable — it
+-- only decides which anonymous reader sees which client thread on the
+-- public link. The OWNER's side (the authenticated app, RLS-gated) reads
+-- every comment regardless of this column; nothing here narrows that.
+--
+-- Additive and nullable: no backfill. Existing rows (dev seeds) keep a
+-- NULL session and therefore surface to no guest — exactly the fail-closed
+-- default we want for feedback written before scoping existed.
+-- ============================================================
+
+alter table public.canvas_comment add column client_session text;

@@ -1,0 +1,35 @@
+# Defensive root-level patterns. The Next.js app under `app/` has its own
+# .gitignore that handles node_modules, .next, .env.local, tsbuildinfo, etc.
+
+# Dependencies / build caches (the app/ and bridge/ trees have their own
+# .gitignore; this catches stray node_modules at the repo root, e.g. vite's)
+node_modules/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Stray envs at the repo root (the app's own .env.local is gitignored by app/.gitignore)
+.env
+.env.*
+!.env.example
+
+# Remotion demo stills are re-shot from a synthetic deck, never committed
+# (they render the live product, which can contain real client decks).
+/remotion/public/shots/
+
+# Internal-only product-discovery notes (name real teammates, clients, usage
+# analytics). Kept on disk, never published.
+/docs/discovery/
+/docs/onboarding-plan.md
+
+# Supabase CLI scratch created when running `supabase` from the repo root
+# (the real project lives in app/supabase/; app/.gitignore ignores its own .temp).
+/supabase/
+
+# Conference / meetup talk decks + their screenshots, fonts, and video.
+# Large binary presentation assets — kept on disk, not versioned in the app repo.
+/talks/

@@ -1,0 +1,229 @@
+#!/bin/bash
+# Bootstrap the canvas app host. Runs once on first boot.
+# NOTE: rendered by Terraform's templatefile(). All bash variables are written
+# brace-free (use $VAR, never the $${} brace form) so they are not mistaken for
+# Terraform interpolation. The interpolated tokens below ARE Terraform values:
+# deploy_bucket, env_param, region, log_group, app_port.
+set -euxo pipefail
+exec > /var/log/canvas-bootstrap.log 2>&1
+echo "[bootstrap] start $(date -u)"
+
+# ── swap: 4 GiB of headroom for a headless Chromium render on the 2 GiB box ────
+# (t4g.small has 2 GiB RAM; this swap is what keeps a render spike off the OOM
+# killer. Renders are also bounded in-app — one gate, a reused Chromium.)
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=4096
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# ── Node.js 22 LTS (NodeSource; fall back to the AL2023 package) ──────────────
+if ! command -v node >/dev/null 2>&1; then
+  (curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - && dnf install -y nodejs) \
+    || dnf install -y nodejs npm
+fi
+node -v
+
+# ── CloudWatch agent (best-effort; never block the app on it) ─────────────────
+dnf install -y amazon-cloudwatch-agent || true
+
+# ── cloudflared (binary only; the tunnel token is configured out-of-band by ────
+# scripts/create-tunnel.sh once the Cloudflare tunnel exists).
+if ! command -v cloudflared >/dev/null 2>&1; then
+  dnf install -y https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-aarch64.rpm \
+    || { curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared; } \
+    || true
+fi
+
+# ── service user + directory layout ──────────────────────────────────────────
+id -u canvas >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/canvas --shell /usr/sbin/nologin canvas
+install -d -o canvas -g canvas /opt/canvas /opt/canvas/bin /opt/canvas/ms-playwright /var/log/canvas /etc/canvas
+
+# ── deploy config consumed by canvas-pull (Terraform-interpolated values) ─────
+cat > /etc/canvas/deploy.conf <<EOF
+DEPLOY_BUCKET=${deploy_bucket}
+ENV_PARAM=${env_param}
+AWS_REGION=${region}
+APP_PORT=${app_port}
+EOF
+
+# ── Chromium setup helper (idempotent + re-runnable) ──────────────────────────
+# @sparticuz/chromium is x86_64-only, and Chrome-for-Testing publishes no arm64
+# Linux build — so we install Chromium via Playwright (which DOES ship arm64
+# builds) and symlink it to a stable path the systemd unit pins as CHROMIUM_PATH.
+# Extracted into its own script so canvas-pull can SELF-HEAL it if the binary ever
+# goes missing (e.g. a failed first-boot install). Non-fatal by design: a failure
+# here only loses PDF export, not the whole app. The deps are Chromium's shared
+# libraries; --skip-broken tolerates name drift across AL2023 minor releases.
+cat > /usr/local/bin/canvas-chromium-setup <<'CHROMIUM'
+#!/bin/bash
+set -uo pipefail
+if [ -x /opt/canvas/bin/chrome ]; then echo "[chromium] already present"; exit 0; fi
+dnf install -y --skip-broken \
+  nss nspr atk at-spi2-atk at-spi2-core cups-libs libdrm mesa-libgbm libxkbcommon \
+  libX11 libXcomposite libXcursor libXdamage libXext libXfixes libXi libXrandr \
+  libXScrnSaver libXtst pango cairo alsa-lib gtk3 libxshmfence \
+  liberation-fonts google-noto-sans-fonts || true
+sudo -u canvas HOME=/home/canvas PLAYWRIGHT_BROWSERS_PATH=/opt/canvas/ms-playwright \
+  npx --yes playwright@latest install chromium || { echo "[chromium] playwright install failed"; exit 1; }
+CHROME_BIN="$(find /opt/canvas/ms-playwright -type f -name chrome -path '*chrome-linux*' 2>/dev/null | head -n1)"
+if [ -n "$CHROME_BIN" ]; then
+  ln -sf "$CHROME_BIN" /opt/canvas/bin/chrome
+  echo "[chromium] -> $CHROME_BIN"
+else
+  echo "[chromium] no binary resolved"; exit 1
+fi
+CHROMIUM
+chmod +x /usr/local/bin/canvas-chromium-setup
+/usr/local/bin/canvas-chromium-setup \
+  || echo "[bootstrap] chromium setup failed — PDF export will 500 until fixed (re-run /usr/local/bin/canvas-chromium-setup)"
+
+# ── code pull + restart helper (re-run on every deploy via SSM) ──────────────
+# The CI build ships a Next standalone bundle (server.js + traced node_modules +
+# .next/static + public), so there is NO npm ci / build on the box — just extract,
+# validate the env, restart, and GATE on /api/health so a crash-loop or a broken
+# env fails the deploy (SSM Status != Success) instead of going green.
+cat > /usr/local/bin/canvas-pull <<'PULL'
+#!/bin/bash
+set -euo pipefail
+source /etc/canvas/deploy.conf
+tmp=$(mktemp -d)
+echo "[canvas-pull] downloading app.tar.gz from s3://$DEPLOY_BUCKET"
+aws s3 cp "s3://$DEPLOY_BUCKET/app.tar.gz" "$tmp/app.tar.gz" --region "$AWS_REGION"
+rm -rf /opt/canvas/app
+mkdir -p /opt/canvas/app
+tar -xzf "$tmp/app.tar.gz" -C /opt/canvas/app
+
+echo "[canvas-pull] fetching env from SSM $ENV_PARAM"
+tmpenv="$tmp/app.env"
+aws ssm get-parameter --name "$ENV_PARAM" --with-decryption --region "$AWS_REGION" --query 'Parameter.Value' --output text > "$tmpenv"
+# `--output text` prints the literal "None" for an empty/null param value, and the
+# `>` already truncated any prior good file — so never restart into an empty or
+# obviously-incomplete env (that boots a broken app that still reports Success).
+# CANVAS_CREDENTIAL_ENCRYPTION_KEY is required too: without it the OpenRouter
+# runtime can't decrypt stored keys, and the deploy would otherwise go green (it
+# once vanished because it was set on the file but not in the SSM param this file
+# is regenerated from). Require a NON-EMPTY value — a bare `grep '^KEY='` also
+# matches `KEY=` with nothing after, so a blank key would slip through; `.+`
+# forces at least one char. The post-restart /api/ready probe below then confirms
+# the key is actually a usable base64 32-byte key (this grep only proves it's set).
+if [ ! -s "$tmpenv" ] || [ "$(cat "$tmpenv")" = "None" ] \
+   || ! grep -qE '^SUPABASE_SECRET_KEY=.+' "$tmpenv" \
+   || ! grep -qE '^CANVAS_CREDENTIAL_ENCRYPTION_KEY=.+' "$tmpenv"; then
+  echo "[canvas-pull] FATAL: env from $ENV_PARAM is empty/None or missing/blank SUPABASE_SECRET_KEY / CANVAS_CREDENTIAL_ENCRYPTION_KEY — refusing to deploy" >&2
+  rm -rf "$tmp"; exit 1
+fi
+install -o canvas -g canvas -m 600 "$tmpenv" /etc/canvas/app.env
+chown -R canvas:canvas /opt/canvas/app
+rm -rf "$tmp"
+
+# Self-heal Chromium if the binary went missing (best-effort; PDF export only).
+[ -x /opt/canvas/bin/chrome ] || /usr/local/bin/canvas-chromium-setup \
+  || echo "[canvas-pull] chromium still missing — PDF export will 500"
+
+systemctl restart canvas.service
+
+# A restart returns as soon as the unit is STARTED, not healthy. Poll /api/health
+# so a crash-loop (bad bundle / bad env / missing native dep) fails the deploy.
+healthy=
+for i in $(seq 1 20); do
+  if curl -fsS "http://127.0.0.1:$APP_PORT/api/health" >/dev/null 2>&1; then
+    echo "[canvas-pull] healthy after $i s"; healthy=1; break
+  fi
+  sleep 1
+done
+if [ -z "$healthy" ]; then
+  echo "[canvas-pull] FATAL: canvas did not pass /api/health within 20s after restart" >&2
+  systemctl is-active canvas.service || true
+  journalctl -u canvas --no-pager -n 50 >&2 || true
+  exit 1
+fi
+
+# Liveness is up; now confirm the box is actually USABLE for the OpenRouter
+# runtime. /api/ready re-derives credentialEncryptionAvailable() — env key present
+# AND a valid base64 32-byte key — the part the env grep above can't verify. Check
+# ONLY the encryption sub-check, not the whole `ready` flag, so a transient
+# schema-behind / DB blip doesn't keep the box from coming up, but a missing or
+# MALFORMED CANVAS_CREDENTIAL_ENCRYPTION_KEY fails the deploy instead of silently
+# shipping a runtime that can't decrypt keys. (No `-f`: /api/ready returns 503 when
+# not fully ready and we still want its body.)
+ready=$(curl -sS "http://127.0.0.1:$APP_PORT/api/ready" 2>/dev/null || true)
+case "$ready" in
+  *'"encryption":{"state":"ok"}'*)
+    echo "[canvas-pull] credential encryption ready" ;;
+  *)
+    echo "[canvas-pull] FATAL: /api/ready reports credential encryption not ready — CANVAS_CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key" >&2
+    echo "[canvas-pull] /api/ready: $ready" >&2
+    exit 1 ;;
+esac
+exit 0
+PULL
+chmod +x /usr/local/bin/canvas-pull
+
+# ── systemd unit ──────────────────────────────────────────────────────────────
+cat > /etc/systemd/system/canvas.service <<UNIT
+[Unit]
+Description=21x Canvas (Next.js standalone server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=canvas
+Group=canvas
+WorkingDirectory=/opt/canvas/app
+EnvironmentFile=/etc/canvas/app.env
+Environment=NODE_ENV=production
+Environment=HOME=/home/canvas
+Environment=PORT=${app_port}
+Environment=HOSTNAME=127.0.0.1
+Environment=CHROMIUM_PATH=/opt/canvas/bin/chrome
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/canvas/ms-playwright
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/canvas/app.log
+StandardError=append:/var/log/canvas/app.log
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable canvas.service
+
+# ── CloudWatch agent config (guarded: only if the agent installed) ───────────
+# Ship both the app log AND the bootstrap log — the latter carries the Chromium
+# install result, which is otherwise only visible via an SSM shell.
+if [ -d /opt/aws/amazon-cloudwatch-agent/etc ]; then
+  cat > /opt/aws/amazon-cloudwatch-agent/etc/canvas.json <<CWA
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/canvas/app.log",
+            "log_group_name": "${log_group}",
+            "log_stream_name": "{instance_id}"
+          },
+          {
+            "file_path": "/var/log/canvas-bootstrap.log",
+            "log_group_name": "${log_group}",
+            "log_stream_name": "{instance_id}-bootstrap"
+          }
+        ]
+      }
+    }
+  }
+}
+CWA
+  /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/canvas.json || true
+fi
+
+# ── first pull (no-op until scripts/deploy.sh has uploaded the code) ─────────
+/usr/local/bin/canvas-pull || echo "[bootstrap] no code yet (or first pull failed) — run scripts/deploy.sh from your laptop."
+echo "[bootstrap] done $(date -u)"

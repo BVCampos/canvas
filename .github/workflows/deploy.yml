@@ -1,0 +1,175 @@
+name: Deploy to AWS
+
+# Build the Next standalone bundle, apply pending DB migrations to prod, ship the
+# bundle to the S3 deploy bucket, and trigger canvas-pull on the EC2 box via SSM.
+# Auth is GitHub OIDC → an IAM role (no static AWS keys). Push to main = prod
+# deploy. PRs build only (no deploy, no migrate, no preview env — see
+# app/infra/README.md for why previews were dropped).
+#
+# Migrations run BEFORE any code reaches the box, so a deploy can't go live
+# expecting columns that don't exist yet. This requires a ONE-TIME history
+# reconcile: prod's migration history was stamped with timestamp version ids, so
+# the sequential 00xx local versions must be marked applied with
+# `supabase migration repair --status applied <versions>` before the first CI run
+# (otherwise `db push` tries to re-run 0000 against existing objects).
+#
+# Required GitHub config (set once from `terraform output`):
+#   secret  AWS_DEPLOY_ROLE_ARN    = <ci_deploy_role_arn>
+#   secret  SUPABASE_ACCESS_TOKEN  = <personal access token, canvas org>
+#   secret  SUPABASE_DB_PASSWORD   = <prod Postgres password>
+#   var     AWS_REGION             = us-east-1
+#   var     AWS_DEPLOY_BUCKET      = <deploy_bucket>
+#   var     AWS_INSTANCE_ID        = <instance_id>
+#   var     NEXT_PUBLIC_SUPABASE_URL
+#   var     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+#   var     NEXT_PUBLIC_APP_URL    = https://canvas.21xventures.com
+#
+# If AWS_DEPLOY_BUCKET is not set (a clone/mirror that doesn't deploy), the
+# deploy job skips itself and only the check job runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A prod deploy must never be abandoned half-done, so pushes are NOT cancelled.
+# PR build runs are.
+concurrency:
+  group: aws-${{ github.event_name == 'push' && 'production' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  # Gate: typecheck + lint + the full vitest suite. Runs on BOTH pull_request and
+  # push so a regression that merely compiles (a broken proposal-permission, a
+  # batch-approve edge, an export path) can't reach prod. The deploy job below
+  # `needs: check`, so a red check blocks the deploy entirely.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install deps
+        working-directory: app
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: Lint
+        working-directory: app
+        run: npm run lint
+
+      - name: Test
+        working-directory: app
+        run: npm test
+
+  deploy:
+    needs: check
+    # Skip cleanly on repos where the deploy target isn't configured (e.g. the
+    # public mirror): without this, every push to main fails at the AWS steps.
+    # `check` above remains the gate contributors see.
+    if: vars.AWS_DEPLOY_BUCKET != ''
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install deps
+        working-directory: app
+        run: npm ci
+
+      - name: Build (standalone)
+        working-directory: app
+        # NEXT_PUBLIC_* are inlined into the client bundle at build time, so they
+        # must be present here (they're public — repo vars, not secrets). The
+        # server-only SUPABASE_SECRET_KEY is NOT needed at build; it's read at
+        # runtime from /etc/canvas/app.env (SSM). The runtime bundle is pure JS,
+        # so building on x64 runs fine on the arm64 box; switch to an arm64
+        # runner only if a native runtime dep ever appears.
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+        run: npm run build
+
+      - name: Assemble standalone tarball
+        working-directory: app
+        # Next standalone does not copy static assets or public/ — merge them in
+        # so the box's `node server.js` finds them.
+        run: |
+          mkdir -p .next/standalone/.next
+          cp -r .next/static .next/standalone/.next/static
+          [ -d public ] && cp -r public .next/standalone/public || true
+          tar -czf "$RUNNER_TEMP/app.tar.gz" -C .next/standalone .
+
+      # Apply pending migrations to prod Supabase before anything ships. Placed
+      # after the build so we only touch the DB when we're about to deploy, and
+      # before the S3/SSM steps so code never goes live ahead of its schema. A
+      # failed migration fails the job → SSM never runs → no half-deploy. The
+      # project ref is parsed from the public Supabase URL (no extra var); auth
+      # is the access token + DB password (env, both repo secrets). History must
+      # be reconciled once (see header) or `db push` will try to re-run 0000.
+      - name: Set up Supabase CLI
+        if: github.event_name == 'push'
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.84.2
+
+      - name: Apply DB migrations (prod)
+        if: github.event_name == 'push'
+        working-directory: app
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          REF="$(printf '%s' "${{ vars.NEXT_PUBLIC_SUPABASE_URL }}" | sed -E 's#https?://([^.]+)\..*#\1#')"
+          echo "Linking project $REF"
+          supabase link --project-ref "$REF"
+          supabase db push --yes
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload artifact to S3
+        if: github.event_name == 'push'
+        run: aws s3 cp "$RUNNER_TEMP/app.tar.gz" "s3://${{ vars.AWS_DEPLOY_BUCKET }}/app.tar.gz" --region "${{ vars.AWS_REGION }}"
+
+      - name: Trigger pull + restart via SSM
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          CMD="$(aws ssm send-command \
+            --instance-ids "${{ vars.AWS_INSTANCE_ID }}" \
+            --region "${{ vars.AWS_REGION }}" \
+            --document-name AWS-RunShellScript \
+            --comment 'canvas CI deploy' \
+            --parameters commands='["/usr/local/bin/canvas-pull"]' \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM command: $CMD"
+          aws ssm wait command-executed --command-id "$CMD" --instance-id "${{ vars.AWS_INSTANCE_ID }}" --region "${{ vars.AWS_REGION }}" \
+            || echo "::warning::SSM wait did not confirm completion within the budget — reading final status directly"
+          echo "──────── deploy output ────────"
+          aws ssm get-command-invocation --command-id "$CMD" --instance-id "${{ vars.AWS_INSTANCE_ID }}" --region "${{ vars.AWS_REGION }}" --query 'StandardOutputContent' --output text || true
+          STATUS="$(aws ssm get-command-invocation --command-id "$CMD" --instance-id "${{ vars.AWS_INSTANCE_ID }}" --region "${{ vars.AWS_REGION }}" --query 'Status' --output text)"
+          echo "Status: $STATUS"
+          test "$STATUS" = "Success"

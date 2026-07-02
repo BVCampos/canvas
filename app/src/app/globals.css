@@ -1,0 +1,400 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Color semantics:
+ *   --accent          (blue)   = humans / collaboration / share / read-state
+ *   --accent-warm     (copper) = agent presence / machine-readable layer
+ *   --warning / amber          = stale, contested, or conflict state (NOT for editing or proposals)
+ *   --success / green          = applied / merged / connected
+ *   --danger / red             = destructive / revoked
+ */
+:root {
+  /* 21x raw palette — aligned with Institutional Presentation template */
+  --ink: #0e1a2b;
+  --graphite: #18253a;
+  --slate: #36475c;
+  --steel: #66788c;
+  --silver: #9daec2;
+  --mist: #d9e5f2;
+  --fog: #f1f5fb;
+  --paper: #ffffff;
+  --paper-soft: #ffffff;
+  --accent: #2563eb;
+  --accent-dim: #1d4ed8;
+  --accent-wash: #dbeafe;
+  --accent-bright: #3b82f6;
+  --accent-warm: #e67a3b;
+  --copper-deep: #b85d22;
+  --navy-glow: #0a1424;
+
+  --success: #1f9d6a;
+  --warning: #e67a3b;
+  --danger: #c44545;
+
+  /* Foreground (text) variants — darker so small state-text on the pale
+   * warning/success/danger fills clears WCAG AA in light mode. Fills, borders,
+   * and dots keep the brighter --success/--warning/--danger above; only TEXT
+   * uses these (text-warning-fg etc.). Dark mode (below) flips them back to the
+   * bright values, which already pass on the dark surfaces. */
+  --success-fg: #065f46;
+  --warning-fg: #92400e;
+  --danger-fg: #991b1b;
+
+  --border-soft: rgba(29, 78, 216, 0.16);
+  --border-strong: rgba(29, 78, 216, 0.28);
+
+  /* shadcn-style mapping */
+  --background: var(--fog);
+  --foreground: var(--ink);
+  --card: var(--paper);
+  --card-foreground: var(--ink);
+  --popover: var(--paper);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: #ffffff;
+  --secondary: #ffffff;
+  --secondary-foreground: var(--ink);
+  --muted: var(--fog);
+  --muted-foreground: var(--steel);
+  --accent-bg: var(--accent-wash);
+  --accent-fg: var(--accent-dim);
+  --destructive: var(--danger);
+  --destructive-foreground: #ffffff;
+  --border: var(--border-soft);
+  --input: var(--border-soft);
+  --ring: var(--accent);
+}
+
+/* Dark mode — quiet, slightly cool. "Editor at midnight."
+ * Activated by adding `.dark` to <html>. The token names map to the
+ * same Tailwind utilities (bg-background, text-foreground, etc.) so
+ * components flip purely by virtue of the class on the root. */
+.dark {
+  /* Raw palette overrides — keep semantic names, swap the values.
+   * --ink stays light (text on a dark surface) and --fog/--paper move
+   * to deep cool greys so existing bg-fog/bg-paper utilities work. */
+  --ink: oklch(0.94 0.01 260);
+  --graphite: oklch(0.86 0.01 260);
+  --slate: oklch(0.72 0.015 260);
+  --steel: oklch(0.62 0.02 260);
+  --silver: oklch(0.48 0.02 260);
+  --mist: oklch(0.28 0.02 260);
+  --fog: oklch(0.20 0.02 260);
+  --paper: oklch(0.23 0.02 260);
+  --paper-soft: oklch(0.26 0.02 260);
+
+  /* Accents nudged brighter so they still pop on dark surfaces. */
+  --accent: #3b82f6;
+  --accent-dim: #60a5fa;
+  --accent-wash: rgba(59, 130, 246, 0.18);
+  --accent-bright: #60a5fa;
+  --accent-warm: #f49664;
+  --copper-deep: #d27a3f;
+  --navy-glow: oklch(0.14 0.02 260);
+
+  --success: #34d399;
+  --warning: #f49664;
+  --danger: #f87171;
+  /* On dark surfaces the bright values already clear AA, so text reuses them. */
+  --success-fg: #34d399;
+  --warning-fg: #f49664;
+  --danger-fg: #f87171;
+
+  --border-soft: rgba(148, 163, 184, 0.18);
+  --border-strong: rgba(148, 163, 184, 0.32);
+
+  /* shadcn-style mapping (re-bound to the dark raw palette). */
+  --background: oklch(0.16 0.02 260);
+  --foreground: var(--ink);
+  --card: var(--paper);
+  --card-foreground: var(--ink);
+  --popover: var(--paper);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: oklch(0.16 0.02 260);
+  --secondary: var(--paper);
+  --secondary-foreground: var(--ink);
+  --muted: var(--fog);
+  --muted-foreground: var(--steel);
+  --accent-bg: var(--accent-wash);
+  --accent-fg: var(--accent-bright);
+  --destructive: var(--danger);
+  --destructive-foreground: oklch(0.16 0.02 260);
+  --border: var(--border-soft);
+  --input: var(--border-soft);
+  --ring: var(--accent);
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent-bg);
+  --color-accent-foreground: var(--accent-fg);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ink: var(--ink);
+  --color-graphite: var(--graphite);
+  --color-slate: var(--slate);
+  --color-steel: var(--steel);
+  --color-silver: var(--silver);
+  --color-mist: var(--mist);
+  --color-fog: var(--fog);
+  --color-paper: var(--paper);
+  --color-paper-soft: var(--paper-soft);
+  --color-brand: var(--accent);
+  --color-brand-dim: var(--accent-dim);
+  --color-brand-bright: var(--accent-bright);
+  --color-brand-wash: var(--accent-wash);
+  --color-warm: var(--accent-warm);
+  --color-copper-deep: var(--copper-deep);
+  --color-navy-glow: var(--navy-glow);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-success-fg: var(--success-fg);
+  --color-warning-fg: var(--warning-fg);
+  --color-danger-fg: var(--danger-fg);
+  --color-border-strong: var(--border-strong);
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    var(--font-jetbrains-mono), "JetBrains Mono", ui-monospace,
+    SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.app-shell .eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--steel);
+}
+
+/* A quiet but unmistakable keyboard focus fallback. Components may refine the
+ * shape, but interactive elements never lose their focus indicator. */
+.app-shell :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-wash);
+  color: var(--ink);
+}
+
+.dark ::selection {
+  background: rgba(59, 130, 246, 0.32);
+  color: var(--ink);
+}
+
+.app-shell {
+  position: relative;
+  background: var(--background);
+  /* `overflow-x: clip` (instead of `hidden`) avoids establishing the body
+   * as a vertical scrolling container. With `hidden` the topbar's
+   * `position: sticky; top: 0` was pinning to <body> (the new scroll
+   * ancestor) rather than the viewport, so it would scroll out of view on
+   * routes that rely on the document scroll — most visibly the
+   * /canvases/{id}/history page. `clip` clips horizontal overflow without
+   * the side-effect of becoming a scroll container, so sticky again
+   * positions relative to the visual viewport.
+   *
+   * Browser support: Chrome 90+, Firefox 81+, Safari 15.4+ — comfortably
+   * inside the app's target matrix. */
+  overflow-x: clip;
+}
+
+.app-shell-atmosphere {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(
+      ellipse 1100px 720px at 88% -10%,
+      rgba(106, 168, 255, 0.20) 0%,
+      rgba(106, 168, 255, 0.10) 28%,
+      rgba(106, 168, 255, 0.0) 60%
+    ),
+    radial-gradient(
+      ellipse 900px 600px at 5% 105%,
+      rgba(59, 130, 246, 0.10) 0%,
+      rgba(59, 130, 246, 0.04) 35%,
+      rgba(59, 130, 246, 0) 65%
+    );
+}
+
+.dark .app-shell-atmosphere {
+  background:
+    radial-gradient(
+      ellipse 1100px 720px at 88% -10%,
+      rgba(59, 130, 246, 0.10) 0%,
+      rgba(59, 130, 246, 0.05) 28%,
+      rgba(59, 130, 246, 0.0) 60%
+    ),
+    radial-gradient(
+      ellipse 900px 600px at 5% 105%,
+      rgba(244, 150, 100, 0.06) 0%,
+      rgba(244, 150, 100, 0.03) 35%,
+      rgba(244, 150, 100, 0) 65%
+    );
+}
+
+/* Slide preview frame keeps the light background in dark mode because
+ * the iframe content is user-authored and themed independently. We just
+ * tone down the box shadow / inset highlight so it doesn't glow. */
+.dark .slide-preview-frame {
+  box-shadow:
+    0 30px 60px -20px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Slide preview frame — used by the iframe wrapper in deck-workspace.tsx.
+ * Hosts the .activity-hairline at its top edge. */
+.slide-preview-frame {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  box-shadow:
+    0 30px 60px -20px rgba(14, 26, 43, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+}
+
+/* Copper hairline activity indicator.
+ * Sits at the very top edge of the slide preview frame.
+ * Drive states from the consuming component via [data-activity="…"]. */
+.activity-hairline {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  width: 100%;
+  pointer-events: none;
+  z-index: 2;
+  background: transparent;
+  transition: background-color 200ms ease, opacity 200ms ease;
+}
+
+.activity-hairline[data-activity="idle"] {
+  background: transparent;
+  opacity: 0;
+}
+
+.activity-hairline[data-activity="human"] {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.activity-hairline[data-activity="pending"] {
+  background: var(--accent-warm);
+  opacity: 1;
+}
+
+.activity-hairline[data-activity="claude-active"] {
+  opacity: 1;
+  background-image: linear-gradient(
+    90deg,
+    var(--accent-warm) 0%,
+    var(--accent-warm) 30%,
+    #ffb27a 50%,
+    var(--accent-warm) 70%,
+    var(--accent-warm) 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  background-position: 100% 0;
+  animation: claude-pulse 2s ease-in-out infinite;
+}
+
+@keyframes claude-pulse {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-hairline[data-activity="claude-active"] {
+    animation: none;
+    background-image: none;
+    background-color: var(--accent-warm);
+  }
+}
+
+@layer utilities {
+  .font-machine {
+    font-family: var(--font-mono);
+    font-feature-settings: "tnum" 1, "ss01" 1;
+    letter-spacing: 0.01em;
+  }
+  .text-machine-copper {
+    color: var(--accent-warm);
+  }
+  .text-machine-blue {
+    color: var(--accent);
+  }
+
+  /* --- Safe-area insets ---------------------------------------------------
+   * Only meaningful because the root layout sets viewport-fit=cover (see the
+   * `viewport` export in layout.tsx), which lets the layout extend under the
+   * notch and home indicator on modern phones. Bottom-anchored overlays — the
+   * present-mode control bar and the mobile activity / slide-list sheets —
+   * use these so their controls clear the home indicator instead of sitting
+   * beneath it. `pb-safe` carries a 1rem floor so phones without an inset
+   * (the value resolves to 0 there) still get comfortable spacing; the raw
+   * variants are for cases that already supply their own base padding. */
+  .pb-safe {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+  .pb-safe-raw {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+}

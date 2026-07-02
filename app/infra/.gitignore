@@ -1,0 +1,16 @@
+# Terraform — never commit state (it can hold sensitive resolved values) or the
+# provider cache. State lives in the S3 backend (see versions.tf).
+# NOTE: .terraform.lock.hcl IS committed on purpose (pins provider versions),
+# matching the agentic-workspace infra — so it's deliberately not ignored here.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

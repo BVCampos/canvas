@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini deck — fixture</title>
+<style>
+  .deck { background: #fff; }
+  .slide { padding: 24px; }
+  h1 { font-size: 32px; }
+</style>
+</head>
+<body>
+<div class="deck">
+<section class="slide cover-slide">
+  <h1>Cover</h1>
+  <p>Mini deck fixture used to lock parser behaviour.</p>
+</section>
+<section class="slide content-slide">
+  <div class="eyebrow">Section 01</div>
+  <h2>Painéis</h2>
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" alt="1px">
+  <p>With an inline image that should be hoisted.</p>
+</section>
+<section class="slide blue-slide divider">
+  <p>No heading — title should fallback to the eyebrow or class modifier.</p>
+</section>
+</div>
+<script>
+  (function () { console.log("nav loaded"); })();
+</script>
+</body>
+</html>

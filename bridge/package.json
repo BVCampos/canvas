@@ -1,0 +1,32 @@
+{
+  "name": "@21xventures/canvas-agent",
+  "version": "0.3.1",
+  "description": "Provider-neutral local bridge for the Canvas in-app assistant — supports Claude Code and Codex.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "canvas-agent": "./canvas-agent.mjs"
+  },
+  "files": [
+    "canvas-agent.mjs",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BVCampos/canvas.git",
+    "directory": "bridge"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  },
+  "scripts": {
+    "start": "node canvas-agent.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.178"
+  }
+}

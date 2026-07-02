@@ -1,0 +1,27 @@
+-- ============================================================
+-- Canvas bundled slide edit — enum value (migration 0031)
+-- ============================================================
+-- Adds the 'slide_edit' kind: a SINGLE proposal that carries any combination
+-- of a slide's html_body, slide_styles, and title together (in the structured
+-- new_slide_payload jsonb column), applied atomically as one new version on
+-- approval.
+--
+-- Before this, an agent redesigning a slide had to split the change into
+-- separate slide_html / slide_styles / slide_title proposals. Reviewers could
+-- then approve one and reject (or skip) the other, leaving the slide in a
+-- broken intermediate state (new markup against old CSS, or vice versa), and
+-- one logical change littered version history with two bumps. 'slide_edit'
+-- makes the bundle the unit of review and the unit of application.
+--
+-- The legacy single-field kinds (slide_html / slide_styles / slide_title) are
+-- intentionally KEPT — historical rows still carry them, and canvas_apply_edit
+-- still resolves any pending pre-deploy proposals of those kinds. New proposals
+-- from propose_slide_edit are always 'slide_edit'.
+--
+-- Postgres requires a new enum value to be committed before it can be used in
+-- a CHECK constraint or referenced as a literal, so this migration ONLY adds
+-- the value. Migration 0032 extends the shape CHECK and the apply RPC. (Same
+-- enum-then-apply split as 0009/0010, 0023/0024, 0028/0029.)
+-- ============================================================
+
+alter type public.canvas_edit_kind add value if not exists 'slide_edit';

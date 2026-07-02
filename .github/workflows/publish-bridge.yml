@@ -1,0 +1,62 @@
+name: Publish canvas-agent bridge
+
+# Publishes the bridge (bridge/) to GitHub Packages as @21xventures/canvas-agent.
+# PRIVATE: a GitHub Packages package inherits this repo's visibility, so while the
+# repo is private only org members with a `read:packages` token can install it
+# (`npx @21xventures/canvas-agent`). See bridge/README.md and ADR-0006.
+#
+# Two ways to trigger:
+#   • push a tag  canvas-agent-v<version>   (version must match bridge/package.json)
+#   • run manually from the Actions tab (workflow_dispatch)
+#
+# A release bumps BOTH the bridge version AND the app's pin that decides whether a
+# running bridge is "outdated" — do it in one step, then tag:
+#   node scripts/release-bridge.mjs <new-version>
+#   git commit -am "release: canvas-agent v<new-version>"
+#   git tag canvas-agent-v<new-version> && git push --follow-tags
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'canvas-agent-v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # publish to GitHub Packages
+    steps:
+      - uses: actions/checkout@v4
+
+      # registry-url + scope write the project .npmrc so `npm publish` targets
+      # GitHub Packages and authenticates with NODE_AUTH_TOKEN below.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@21xventures'
+
+      # A tag push must publish exactly the version it names — fail loudly if the
+      # tag drifted from bridge/package.json (the release script keeps them equal).
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#canvas-agent-v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != bridge/package.json version $PKG"
+            exit 1
+          fi
+          echo "publishing @21xventures/canvas-agent@$PKG"
+
+      # No `npm ci` needed: publish packs only the `files` whitelist; the runtime
+      # dependency is resolved by the consumer at `npx` time, not bundled here.
+      - name: Publish
+        working-directory: bridge
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
