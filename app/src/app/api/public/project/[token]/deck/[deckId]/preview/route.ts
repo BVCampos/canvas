@@ -19,6 +19,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assembleDeckHtml } from "@/lib/canvas/assemble";
+import { logViewportShimFallback } from "@/lib/canvas/shim-fallback-log";
 import { assetSigQuery } from "@/lib/canvas/asset-sign";
 import { rateLimitOk } from "@/lib/canvas/rate-limit";
 import { trustedClientIp } from "@/lib/canvas/client-ip";
@@ -92,6 +93,15 @@ export async function GET(
     console.error("[public-project-preview:slides]", slidesErr);
     return new NextResponse("Slide lookup failed", { status: 500 });
   }
+
+  // Signal when this deck lands on the squeeze fallback that scrambles fixed-px
+  // decks (fires only on that path; see logViewportShimFallback).
+  logViewportShimFallback({
+    theme_css: deck.theme_css ?? "",
+    nav_js: deck.nav_js ?? "",
+    surface: "public",
+    deck_id: deck.id as string,
+  });
 
   const html = assembleDeckHtml({
     title: deck.title,

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assembleDeckHtml, needsViewportShim } from "../src/lib/canvas/assemble";
+import {
+  assembleDeckHtml,
+  detectFixedSlideSize,
+  needsViewportShim,
+} from "../src/lib/canvas/assemble";
 
 // Smoke + invariants for assembleDeckHtml — the contract that the iframe
 // preview, the export endpoint, and proposal-diff all depend on. Most of
@@ -148,6 +152,9 @@ describe("assembleDeckHtml — embedded-host guard", () => {
     expect(html).toContain("canvas:element-selected");
     expect(html).toContain("canvas:inspect-save");
     expect(html).toContain("data-canvas-inspect-selected");
+    // The resize grips and their clamped geometry ship with the inspector.
+    expect(html).toContain("data-canvas-handle");
+    expect(html).toContain("cvResizeClamp");
   });
 
   it("ships the inspect-text protocol in preview mode (double-click to edit text)", () => {
@@ -406,13 +413,92 @@ describe("needsViewportShim — fixed-px detection", () => {
     expect(needsViewportShim("")).toBe(false);
     expect(needsViewportShim(".slide{padding:24px;}")).toBe(false);
   });
+
+  it("flags a decimal-px slide width (integer part ≥ 3 digits)", () => {
+    // Some PPTX / standalone exporters emit a sub-pixel design width
+    // (`width:1280.5px`). The width regex was extended to accept a fractional
+    // tail so these decks still trip the gate instead of being mistaken for an
+    // unsized scroll stack and left blank.
+    expect(needsViewportShim(".slide{width:1280.5px}")).toBe(true);
+  });
+
+  it("still trips on a fixed width that appears only inside an @media block", () => {
+    // needsViewportShim scans EVERY `.slide { … }` rule, at-rule blocks
+    // included — a deck that pins its slide width only in a media query is
+    // still a fixed-px deck that renders blank without a shim. detectFixedSlideSize
+    // is the one that excludes at-rules (it must not read a *responsive* width as
+    // the design size); the two intentionally diverge on this input.
+    expect(
+      needsViewportShim(
+        ".slide{padding:40px} @media(max-width:1440px){.slide{width:1200px}}",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("detectFixedSlideSize — design-stage parsing", () => {
+  it("parses width + height from a fixed-px slide rule", () => {
+    expect(
+      detectFixedSlideSize(".slide{width:1920px;height:1080px;padding:24px;}"),
+    ).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it("falls back to the flex basis when width isn't pinned", () => {
+    expect(detectFixedSlideSize(".slide{flex:0 0 1280px;}")).toEqual({
+      width: 1280,
+      height: null,
+    });
+  });
+
+  it("ignores max-width and returns null with no fixed width", () => {
+    expect(detectFixedSlideSize(".slide{max-width:1020px;}")).toBeNull();
+    expect(detectFixedSlideSize(".slide{padding:24px;}")).toBeNull();
+    expect(detectFixedSlideSize("")).toBeNull();
+  });
+
+  it("accepts a decimal width and reports it unrounded", () => {
+    expect(detectFixedSlideSize(".slide{width:1280.5px}")).toEqual({
+      width: 1280.5,
+      height: null,
+    });
+  });
+
+  it("excludes a width pinned only inside an @media block (design size is base rules only)", () => {
+    // A responsive override (`@media{.slide{width:1200px}}`) is NOT the deck's
+    // authoring size — scaling the whole deck to a breakpoint value would be
+    // wrong. Only base `.slide` rules define the design size; here the sole base
+    // rule has no fixed width, so there is nothing to detect.
+    expect(
+      detectFixedSlideSize(
+        ".slide{padding:40px} @media(max-width:1440px){.slide{width:1200px}}",
+      ),
+    ).toBeNull();
+  });
+
+  it("pairs height with the width's OWN block, not a later .slide rule", () => {
+    // Width and height must come from the SAME base block. A trailing
+    // `.slide{height:90px}` is a different rule (and 90 is below the 3-digit
+    // height floor anyway), so the design height stays null rather than
+    // absorbing an unrelated value.
+    expect(
+      detectFixedSlideSize(".slide{width:1920px} .slide{height:90px}"),
+    ).toEqual({ width: 1920, height: null });
+  });
+
+  it("returns null when two base blocks pin DIFFERENT fixed widths (ambiguous → squeeze fallback)", () => {
+    // Conflicting design widths give no single authoring size to scale to, so
+    // the deck falls back to the squeeze shim instead of guessing one.
+    expect(
+      detectFixedSlideSize(".slide{width:1920px} .slide{width:1280px}"),
+    ).toBeNull();
+  });
 });
 
 describe("assembleDeckHtml — viewport shim injection", () => {
   const FIXED_PX_THEME =
     ".slide{flex:0 0 1280px;width:1280px;height:720px;overflow:hidden;}";
 
-  it("injects the shim for a fixed-px deck, after theme_css so it wins the cascade", () => {
+  it("scales a fixed-px deck with the zoom shim, after theme_css so it wins the cascade", () => {
     const html = assembleDeckHtml({
       title: "t",
       theme_css: FIXED_PX_THEME,
@@ -421,13 +507,64 @@ describe("assembleDeckHtml — viewport shim injection", () => {
       mode: "preview",
     });
     expect(html).toContain('data-canvas="viewport-shim"');
-    expect(html).toContain("flex: 0 0 100vw");
+    // The slide keeps its DESIGN size (px content stays at authoring scale)…
+    expect(html).toContain("flex: 0 0 1280px");
+    expect(html).toContain("width: 1280px");
+    // Design HEIGHT flows through too — the height branch of viewportShimZoomCss
+    // emits `height: 720px;` WITH the space; the theme's own `height:720px` has
+    // none, so this pins the SHIM output specifically (not the deck's rule).
+    expect(html).toContain("height: 720px;");
+    // …and the shim scales the whole stage to the viewport instead of
+    // squeezing the box to 100vw (which reflowed/cropped the px content).
+    expect(html).toContain("zoom: var(--slide-zoom, 1)");
+    expect(html).toContain('data-canvas="viewport-shim-zoom"');
+    expect(html).toContain("vw / 1280");
+    // Preview never letterboxes: the export-fit style + script are export-only,
+    // so even a zoom-scaled deck must not carry them here.
+    expect(html).not.toContain('data-canvas="export-fit"');
     // Higher-specificity rebind so it beats the deck's own .slide rule.
     expect(html).toContain("#slides > .slide");
     // Must come AFTER the deck's theme so the cascade resolves to the shim.
     expect(html.indexOf(FIXED_PX_THEME)).toBeLessThan(
       html.indexOf('data-canvas="viewport-shim"'),
     );
+  });
+
+  it("keeps the squeeze shim for a deck that scales itself with --slide-zoom (the kit)", () => {
+    // Kit decks already fill the squeezed box with their own embedded
+    // zoom: var(--slide-zoom) (vw lengths are zoom-immune, so the 100vw rebind
+    // is exactly the box they expect) — handing them the zoom shim's width-fit
+    // driver would double up on their own setZoom, so they keep the exact shim
+    // they co-evolved with.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css:
+        ".slide{width:1920px;height:1080px;} .slide{zoom:var(--slide-zoom,1);}",
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim"');
+    expect(html).toContain("flex: 0 0 100vw");
+    expect(html).not.toContain('data-canvas="viewport-shim-zoom"');
+  });
+
+  it("keeps the squeeze shim when no design width is parseable", () => {
+    // Trips needsViewportShim (a px width buried in the decl) but gives
+    // detectFixedSlideSize nothing to parse — must not emit a zoom driver
+    // with a garbage design width.
+    const theme = ".slide{width:calc(1280px + 0px);}";
+    expect(detectFixedSlideSize(theme)).toBeNull();
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: theme,
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim"');
+    expect(html).toContain("flex: 0 0 100vw");
+    expect(html).not.toContain('data-canvas="viewport-shim-zoom"');
   });
 
   it("omits the shim for a Canvas-native viewport-unit deck", () => {
@@ -450,6 +587,113 @@ describe("assembleDeckHtml — viewport shim injection", () => {
       mode: "export",
     });
     expect(html).toContain('data-canvas="viewport-shim"');
+    // A zoom-shimmed deck is a zoom-scaled carousel like the kit, so the
+    // export letterbox (fit-both + centered stage) now covers it too.
+    expect(html).toContain('data-canvas="export-fit"');
+    // The letterbox ships as TWO independently-gated pieces (style in <head>,
+    // driver <script> in <body>); the assertion above only proves the STYLE.
+    // Pin the SCRIPT too via its own setProperty write — `--cv-fit-w` also
+    // appears in EXPORT_FIT_CSS, so match the JS call, not the bare token.
+    expect(html).toContain("setProperty('--cv-fit-w'");
+  });
+
+  it("does not letterbox a vertical-stack export (no shim, no --slide-zoom)", () => {
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: ".slide{padding:24px;min-height:100vh;}",
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "export",
+    });
+    expect(html).not.toContain('data-canvas="export-fit"');
+  });
+
+  it("scales a flex-basis-only fixed-px deck (no width:) with the zoom shim", () => {
+    // The only e2e exercise of the flex-basis design-size path through the real
+    // gate: a deck pinned by `flex` basis alone still resolves a design width,
+    // gets the zoom shim, and feeds that width to the width-fit driver. A null
+    // height must NOT leak into the CSS as `nullpx`.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: ".slide{flex:0 0 1280px;}",
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim-zoom"');
+    expect(html).toContain("flex: 0 0 1280px");
+    expect(html).not.toContain("nullpx");
+    expect(html).toContain("vw / 1280");
+  });
+
+  it("scales a decimal-width fixed-px deck with the zoom shim (design width kept precise)", () => {
+    // Contract: a decimal design width (`width:1280.5px`) trips the gate and
+    // flows into the width-fit driver unrounded — `--slide-zoom = vw / 1280.5`.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: ".slide{width:1280.5px;height:720px;}",
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim-zoom"');
+    expect(html).toContain("vw / 1280.5");
+  });
+
+  it("keeps the squeeze shim when a fixed width appears ONLY inside an @media block", () => {
+    // needsViewportShim trips (there is a px width somewhere) but the design-size
+    // parser excludes at-rules, so no base design width is parseable — the deck
+    // must fall back to the squeeze shim, NOT get a zoom driver seeded from a
+    // responsive breakpoint value.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css:
+        ".slide{padding:40px} @media(max-width:1440px){.slide{width:1200px}}",
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim"');
+    expect(html).toContain("flex: 0 0 100vw");
+    expect(html).not.toContain('data-canvas="viewport-shim-zoom"');
+  });
+
+  it("emits the zoom-shim driver BEFORE the export-fit script so export-fit wins the --slide-zoom tug-of-war", () => {
+    // Both the shim's width-fit driver and EXPORT_FIT_JS write --slide-zoom; the
+    // letterbox (fit-both) must win, which relies on its <script> running AFTER
+    // the shim driver. Assert DOM order. `--cv-fit-w` ALSO appears in
+    // EXPORT_FIT_CSS up in <head>, so `indexOf` there would land on the style —
+    // target the LAST occurrence, the one inside the body export-fit <script>.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: FIXED_PX_THEME,
+      nav_js: DECK_NAV_JS,
+      slides: THREE_SLIDES,
+      mode: "export",
+    });
+    const zoomIdx = html.indexOf('data-canvas="viewport-shim-zoom"');
+    const fitScriptIdx = html.lastIndexOf("--cv-fit-w");
+    expect(zoomIdx).toBeGreaterThanOrEqual(0);
+    expect(zoomIdx).toBeLessThan(fitScriptIdx);
+  });
+
+  it("keeps the squeeze shim when only nav_js scales with --slide-zoom (no competing zoom driver)", () => {
+    // A kit-style deck can carry its own --slide-zoom setter in nav_js while its
+    // theme_css alone looks like a plain fixed-px deck. usesSlideZoom must see
+    // the nav_js occurrence and suppress the zoom shim's width-fit driver,
+    // leaving the squeeze shim the kit's embedded !important rules already
+    // override — handing it a second setZoom would double up.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: ".slide{width:1920px;height:1080px;}",
+      nav_js:
+        "document.documentElement.style.setProperty('--slide-zoom', String(innerWidth/1920));",
+      slides: THREE_SLIDES,
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas="viewport-shim"');
+    expect(html).toContain("flex: 0 0 100vw");
+    expect(html).not.toContain('data-canvas="viewport-shim-zoom"');
   });
 });
 

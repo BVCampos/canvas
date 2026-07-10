@@ -39,8 +39,11 @@ vi.mock("@/lib/canvas/rate-limit", () => ({
 }));
 
 // Pin assembly to a fixed string so the 200 body assertion is independent of
-// the real assembler.
-vi.mock("@/lib/canvas/assemble", () => ({
+// the real assembler. PARTIAL mock: the route also pulls the pure gate helpers
+// (needsViewportShim / detectFixedSlideSize) from this module via its shim
+// telemetry, so pass the rest through and stub only assembleDeckHtml.
+vi.mock("@/lib/canvas/assemble", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/canvas/assemble")>()),
   assembleDeckHtml: vi.fn(() => ASSEMBLED_HTML),
 }));
 

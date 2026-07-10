@@ -25,6 +25,37 @@ export const GITHUB_REPO_URL = "https://github.com/BVCampos/canvas";
 
 export const RELEASES: Release[] = [
   {
+    date: "2026-07-07",
+    title: "Resize on the slide + small-screen fit",
+    items: [
+      {
+        title: "Resize elements right on the slide",
+        description:
+          "Adjust mode now puts resize handles on the selected element: drag a corner or edge to resize it in place (hold Shift to keep the aspect ratio), just like moving it. The inspector panel also gained a Height field next to Width for exact pixel sizes.",
+        tag: "feature",
+      },
+      {
+        title: "Decks fit smaller screens",
+        description:
+          "Fixed-size decks that don't scale themselves now shrink to fit the window everywhere (the editor, Present, share links, and exported files) instead of scrambling on laptops and smaller displays.",
+        tag: "fix",
+        prs: [80],
+      },
+    ],
+  },
+  {
+    date: "2026-07-04",
+    title: "Archive decks",
+    items: [
+      {
+        title: "Archive decks",
+        description:
+          "Shelve a finished or dormant deck out of your list without deleting it. Archived decks are hidden from the deck list behind an Archived tab, still open and edit normally, and unarchive in one click. Archive or unarchive from the deck's ⋯ menu.",
+        tag: "feature",
+      },
+    ],
+  },
+  {
     date: "2026-07-02",
     title: "Idea wave + speed",
     items: [

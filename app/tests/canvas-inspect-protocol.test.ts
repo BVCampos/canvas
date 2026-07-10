@@ -12,7 +12,9 @@ import { assembleDeckHtml } from "@/lib/canvas/assemble";
  * postMessage replies land on the same window — the tests just listen there.
  */
 
-const SLIDE = `<section class="slide"><div id="block" style="font-size: 24px; color: rgb(255, 0, 0); position: absolute; left: 100px; top: 50px;"><p id="inner">Hello</p></div></section>`;
+// #block carries an explicit inline size: jsdom does no layout, so the resize
+// tests' base width/height must resolve from computed (inline) style.
+const SLIDE = `<section class="slide"><div id="block" style="font-size: 24px; color: rgb(255, 0, 0); position: absolute; left: 100px; top: 50px; width: 50px; height: 30px;"><p id="inner">Hello</p></div></section>`;
 
 function createPreview() {
   const html = assembleDeckHtml({
@@ -77,6 +79,8 @@ describe("CANVAS_EDITOR inspect mode (jsdom round-trip)", () => {
     expect(sel!.styles.fontSize).toBe(24);
     expect(sel!.styles.color).toBe("#ff0000");
     expect(sel!.styles.positionMode).toBe("absolute");
+    expect(sel!.styles.width).toBe(50);
+    expect(sel!.styles.height).toBe(30);
     expect(block.getAttribute("data-canvas-inspect-selected")).toBe("true");
   });
 
@@ -87,12 +91,13 @@ describe("CANVAS_EDITOR inspect mode (jsdom round-trip)", () => {
     win.postMessage(
       {
         type: "canvas:inspect-set",
-        styles: { "font-size": "32px", "z-index": "9999" },
+        styles: { "font-size": "32px", height: "40px", "z-index": "9999" },
       },
       "*",
     );
     await flush(win);
     expect(block.style.fontSize).toBe("32px");
+    expect(block.style.height).toBe("40px");
     // Not in INSPECT_PROPS — must be ignored.
     expect(block.style.getPropertyValue("z-index")).toBe("");
 
@@ -182,13 +187,19 @@ describe("CANVAS_EDITOR inspect mode (jsdom round-trip)", () => {
       }),
     );
   }
-  function moveTo(win: Window & typeof globalThis, x: number, y: number) {
+  function moveTo(
+    win: Window & typeof globalThis,
+    x: number,
+    y: number,
+    shift = false,
+  ) {
     win.document.dispatchEvent(
       new win.MouseEvent("pointermove", {
         bubbles: true,
         cancelable: true,
         clientX: x,
         clientY: y,
+        shiftKey: shift,
       }),
     );
   }
@@ -293,5 +304,119 @@ describe("CANVAS_EDITOR inspect mode (jsdom round-trip)", () => {
       | undefined;
     expect(saved!.html).toContain("translate(25px, 15px)");
     expect(saved!.html).not.toContain("data-canvas-inspect-selected");
+  });
+
+  // --- drag-to-resize (8 grips on the selection, clamped like a move) --------
+  // Same jsdom caveat: rects read 0 unless a test stubs a layout in, and the
+  // base width/height resolve from #block's inline style.
+
+  async function selectBlockWithLayout(
+    win: Window & typeof globalThis,
+    messages: Array<Record<string, unknown>>,
+  ) {
+    const block = await startAndSelect(win, messages, "block");
+    const section = win.document.querySelector(
+      '[data-canvas-position="0"]',
+    ) as HTMLElement;
+    // Stage 0..200 × 0..100 at scale 1; #block on screen at 100..150 × 50..80
+    // (matches its inline left/top/width/height).
+    section.getBoundingClientRect = () => rect(0, 0, 200, 100);
+    Object.defineProperty(section, "offsetWidth", {
+      value: 200,
+      configurable: true,
+    });
+    block.getBoundingClientRect = () => rect(100, 50, 150, 80);
+    return block;
+  }
+
+  function grip(win: Window & typeof globalThis, name: string) {
+    return win.document.querySelector(
+      `[data-canvas-handle="${name}"]`,
+    ) as HTMLElement;
+  }
+
+  it("shows 8 resize grips outside the slide section, hidden on deselect", async () => {
+    const { win, messages } = createPreview();
+    await startAndSelect(win, messages, "block");
+    const grips = win.document.querySelectorAll("[data-canvas-handle]");
+    expect(grips.length).toBe(8);
+    const section = win.document.querySelector('[data-canvas-position="0"]')!;
+    for (const g of Array.from(grips)) expect(section.contains(g)).toBe(false);
+
+    win.postMessage({ type: "canvas:inspect-deselect" }, "*");
+    await flush(win);
+    const layer = win.document.querySelector(
+      "[data-canvas-handles]",
+    ) as HTMLElement;
+    expect(layer.style.display).toBe("none");
+  });
+
+  it("resizes width/height from the se grip without moving the element", async () => {
+    const { win, messages } = createPreview();
+    const block = await selectBlockWithLayout(win, messages);
+    press(win, grip(win, "se"), 150, 80);
+    moveTo(win, 170, 95);
+    release(win);
+    expect(block.style.width).toBe("70px");
+    expect(block.style.height).toBe("45px");
+    expect(block.style.left).toBe("100px"); // a resize never moves the anchor
+    expect(block.style.transform).toBe("");
+
+    // The finished gesture re-posts the snapshot so the host panel's size
+    // fields track the new box.
+    await flush(win);
+    const sels = messages.filter((m) => m.type === "canvas:element-selected");
+    const last = sels[sels.length - 1] as {
+      styles: { width: number; height: number };
+    };
+    expect(last.styles.width).toBe(70);
+    expect(last.styles.height).toBe(45);
+  });
+
+  it("re-anchors the left edge when resizing an absolute element from the w grip", async () => {
+    const { win, messages } = createPreview();
+    const block = await selectBlockWithLayout(win, messages);
+    press(win, grip(win, "w"), 100, 60);
+    moveTo(win, 90, 60);
+    release(win);
+    expect(block.style.width).toBe("60px");
+    expect(block.style.left).toBe("90px"); // opposite (east) edge stays put
+  });
+
+  it("locks the aspect ratio with Shift on a corner grip", async () => {
+    const { win, messages } = createPreview();
+    const block = await selectBlockWithLayout(win, messages);
+    press(win, grip(win, "se"), 150, 80);
+    moveTo(win, 175, 80, true); // dx=+25 is the dominant axis (sx = 1.5)
+    release(win);
+    expect(block.style.width).toBe("75px");
+    expect(block.style.height).toBe("45px"); // 30 × 1.5
+  });
+
+  it("clamps a grip drag to the slide bounds", async () => {
+    const { win, messages } = createPreview();
+    const block = await selectBlockWithLayout(win, messages);
+    press(win, grip(win, "se"), 150, 80);
+    moveTo(win, 1000, 1000); // shove past the bottom-right corner
+    release(win);
+    // maxDx = 200 - 150 = 50; maxDy = 100 - 80 = 20
+    expect(block.style.width).toBe("100px");
+    expect(block.style.height).toBe("50px");
+  });
+
+  it("saves a resized slide without grip artifacts", async () => {
+    const { win, messages } = createPreview();
+    await selectBlockWithLayout(win, messages);
+    press(win, grip(win, "se"), 150, 80);
+    moveTo(win, 170, 95);
+    release(win);
+    win.postMessage({ type: "canvas:inspect-save", position: 0 }, "*");
+    await flush(win);
+    const saved = messages.find((m) => m.type === "canvas:slide-html") as
+      | { html: string }
+      | undefined;
+    expect(saved!.html).toContain("width: 70px");
+    expect(saved!.html).toContain("height: 45px");
+    expect(saved!.html).not.toContain("data-canvas-handle");
   });
 });

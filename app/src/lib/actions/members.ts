@@ -76,6 +76,7 @@ export async function inviteMember(formData: FormData) {
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr.code ?? "insert_error",
       props: { role: requestedRole, duplicate: insertErr.code === "23505" },
     });
@@ -156,6 +157,7 @@ export async function revokeInvite(inviteId: string) {
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { invite_id: inviteId },
     });
@@ -380,6 +382,7 @@ export async function changeRole(
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { membership_id: membershipId, new_role: newRole },
     });
@@ -494,6 +497,7 @@ export async function removeMember(membershipId: string) {
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { membership_id: membershipId },
     });

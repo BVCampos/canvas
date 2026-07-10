@@ -77,7 +77,7 @@ export async function GET(
       deck_id: id,
       status: "error",
       duration_ms: Date.now() - started,
-      error_code: err instanceof Error ? err.name : "unknown",
+      error: err,
     });
     return NextResponse.json(
       { ok: false, error: "Pre-flight render failed." },

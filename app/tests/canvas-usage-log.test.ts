@@ -85,7 +85,7 @@ describe("withUsage", () => {
     expect(inserted[0].error_code).toBeNull();
   });
 
-  it("logs status=error with error_code and rethrows on failure", async () => {
+  it("logs status=error with error_code + error_message and rethrows on failure", async () => {
     const boom = new Error("kaboom");
     boom.name = "SpecificError";
     await expect(
@@ -102,6 +102,7 @@ describe("withUsage", () => {
       status: "error",
       error_code: "SpecificError",
     });
+    expect((inserted[0].props as Record<string, unknown>).error_message).toBe("kaboom");
   });
 
   it("prefers a Postgres-style error.code over Error.name", async () => {
@@ -176,6 +177,69 @@ describe("logUsage", () => {
     await flushFireAndForget();
     // Nothing was inserted (insert returned an error), but no throw.
     expect(inserted).toHaveLength(0);
+  });
+});
+
+describe("error diagnostics (the `error` field)", () => {
+  it("derives error_code and props.error_message from a Postgres-style error", async () => {
+    logUsage({
+      event: "proposal.approve",
+      surface: "action",
+      workspace_id: "w1",
+      status: "error",
+      error: { code: "P0001", message: "you can't approve your own proposal" },
+      props: { edit_id: "e1" },
+    });
+    await flushFireAndForget();
+    expect(inserted[0]).toMatchObject({ error_code: "P0001" });
+    expect(inserted[0].props).toEqual({
+      edit_id: "e1",
+      error_message: "you can't approve your own proposal",
+    });
+  });
+
+  it("keeps an explicit error_code and props.error_message over the derived ones", async () => {
+    logUsage({
+      event: "test.explicit",
+      surface: "api",
+      status: "error",
+      error: new Error("derived message"),
+      error_code: "my_code",
+      props: { error_message: "explicit message" },
+    });
+    await flushFireAndForget();
+    expect(inserted[0]).toMatchObject({ error_code: "my_code" });
+    expect((inserted[0].props as Record<string, unknown>).error_message).toBe(
+      "explicit message",
+    );
+  });
+
+  it("accepts a plain string error and clamps long messages like any props string", async () => {
+    logUsage({
+      event: "assistant.turn.error",
+      surface: "api",
+      status: "error",
+      error: "bridge said: " + "x".repeat(500),
+      error_code: "bridge_reported",
+    });
+    await flushFireAndForget();
+    expect(inserted[0].error_code).toBe("bridge_reported");
+    const message = (inserted[0].props as Record<string, unknown>).error_message as string;
+    expect(message.startsWith("bridge said: ")).toBe(true);
+    expect(message.length).toBe(200);
+  });
+
+  it("ignores a null error (optional-chained call sites pass it through)", async () => {
+    logUsage({
+      event: "test.nullerr",
+      surface: "public",
+      status: "error",
+      error: null,
+      error_code: "insert_error",
+    });
+    await flushFireAndForget();
+    expect(inserted[0]).toMatchObject({ error_code: "insert_error" });
+    expect(inserted[0].props).toEqual({});
   });
 });
 

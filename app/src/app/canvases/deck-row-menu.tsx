@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  Archive,
+  ArchiveRestore,
   FolderInput,
   MoreHorizontal,
   Play,
@@ -12,8 +14,9 @@ import {
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DialogShell } from "@/components/dialog-shell";
+import { Button } from "@/components/ui/button";
 import { ShareDeckDialog } from "./[id]/share-dialog";
-import { deleteDeck } from "./[id]/actions";
+import { deleteDeck, setDeckArchived } from "./[id]/actions";
 import { ProjectMoveDialog, type ProjectOption } from "./project-controls";
 
 // Per-row "⋯" for the /canvases deck index — the row's only control besides
@@ -34,6 +37,7 @@ export function DeckRowMenu({
   currentProjectId,
   projects,
   currentUserId,
+  archived,
 }: {
   deckId: string;
   deckTitle: string;
@@ -46,6 +50,9 @@ export function DeckRowMenu({
   currentProjectId: string | null;
   projects: ProjectOption[];
   currentUserId: string | null;
+  // True when this row is on the archived shelf — flips the menu item between
+  // "Archive deck" and "Unarchive deck" (same canManageDeck gate as delete).
+  archived: boolean;
 }) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -53,7 +60,29 @@ export function DeckRowMenu({
   const [shareOpen, setShareOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Archive rarely fails (same gate as the visible affordance), so it needs no
+  // confirm step — it's reversible. A failure surfaces in a small notice.
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  function handleToggleArchive() {
+    setMenuOpen(false);
+    setArchiveError(null);
+    startTransition(async () => {
+      const result = await setDeckArchived(deckId, !archived);
+      if (result.ok) {
+        // setDeckArchived revalidates /canvases server-side; refresh pulls the
+        // deck onto (or off) the archived shelf without a full navigation.
+        router.refresh();
+        return;
+      }
+      setArchiveError(
+        result.error === "not_authorized"
+          ? "You don't have permission to change this deck."
+          : `Couldn't ${archived ? "unarchive" : "archive"} the deck: ${result.error}`,
+      );
+    });
+  }
 
   const itemClass =
     "flex w-full items-center gap-3 px-5 py-2.5 text-left text-sm transition-colors hover:bg-[color:var(--accent-wash)]";
@@ -112,6 +141,26 @@ export function DeckRowMenu({
             {canManageDeck && (
               <button
                 type="button"
+                onClick={handleToggleArchive}
+                className={itemClass}
+              >
+                {archived ? (
+                  <ArchiveRestore
+                    aria-hidden
+                    className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                  />
+                ) : (
+                  <Archive
+                    aria-hidden
+                    className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                  />
+                )}
+                <span>{archived ? "Unarchive deck" : "Archive deck"}</span>
+              </button>
+            )}
+            {canManageDeck && (
+              <button
+                type="button"
                 onClick={() => {
                   setMenuOpen(false);
                   setDeleteError(null);
@@ -123,6 +172,27 @@ export function DeckRowMenu({
                 <span>Delete deck</span>
               </button>
             )}
+          </div>
+        </DialogShell>
+      )}
+
+      {archiveError && (
+        <DialogShell
+          title={archived ? "Couldn't unarchive deck" : "Couldn't archive deck"}
+          onClose={() => setArchiveError(null)}
+        >
+          <div className="space-y-3 px-5 py-4">
+            <p className="text-sm text-muted-foreground">{archiveError}</p>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setArchiveError(null)}
+              >
+                Close
+              </Button>
+            </div>
           </div>
         </DialogShell>
       )}

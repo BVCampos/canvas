@@ -272,6 +272,7 @@ export async function createMcpToken(label: string): Promise<CreateTokenResult> 
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
       props: { has_label: Boolean(trimmedLabel) },
     });
@@ -326,6 +327,7 @@ export async function revokeMcpToken(token: string): Promise<{ ok: boolean; erro
       workspace_id: tokenRow?.workspace_id ?? null,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
     });
     return { ok: false, error: error.message };

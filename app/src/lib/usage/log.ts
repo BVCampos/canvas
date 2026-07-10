@@ -29,6 +29,13 @@ export type UsageEvent = {
   duration_ms?: number;
   status?: UsageStatus;
   error_code?: string | null;
+  // The raw failure (an Error, a PostgrestError, anything thrown). shapeRow
+  // derives error_code from it when the caller didn't set one, and records
+  // its message as props.error_message — a bare code like P0001 is shared by
+  // every RAISE in the RPCs, so without the message the row can't say WHICH
+  // guard fired. Rows are admin-read-only (0014), same trust level as the
+  // console.error the call sites already emit.
+  error?: unknown;
   props?: Record<string, unknown>;
 };
 
@@ -80,7 +87,7 @@ export async function withUsage<T>(
       ...e,
       status: "error",
       duration_ms: Date.now() - started,
-      error_code: extractErrorCode(err),
+      error: err,
     });
     throw err;
   }
@@ -102,9 +109,15 @@ export function __resetUsageClientFactoryForTesting(): void {
 }
 
 // Shape a UsageEvent into a canvas_usage_event row: default the status,
-// null-fill the identity columns, clamp duration, and PII-filter props.
-// Shared by the single- and batch-insert paths so both write the same shape.
+// null-fill the identity columns, clamp duration, derive diagnostics from a
+// raw `error`, and PII-filter props. Shared by the single- and batch-insert
+// paths so both write the same shape.
 function shapeRow(e: UsageEvent) {
+  const props: Record<string, unknown> = { ...(e.props ?? {}) };
+  if (e.error != null && props.error_message === undefined) {
+    const message = extractErrorMessage(e.error);
+    if (message) props.error_message = message;
+  }
   return {
     event: e.event,
     surface: e.surface,
@@ -114,8 +127,8 @@ function shapeRow(e: UsageEvent) {
     deck_id: e.deck_id ?? null,
     slide_id: e.slide_id ?? null,
     duration_ms: typeof e.duration_ms === "number" ? Math.max(0, Math.round(e.duration_ms)) : null,
-    error_code: e.error_code ?? null,
-    props: sanitizeProps(e.props ?? {}),
+    error_code: e.error_code ?? (e.error != null ? extractErrorCode(e.error) : null),
+    props: sanitizeProps(props),
   };
 }
 
@@ -191,4 +204,18 @@ function extractErrorCode(err: unknown): string | null {
     if (err instanceof Error) return err.name || "Error";
   }
   return String(err).slice(0, 100);
+}
+
+// The human-readable half of the diagnostic: Error#message, a
+// PostgrestError's message, or the stringified value. Length is clamped by
+// sanitizeValue like every other props string.
+function extractErrorMessage(err: unknown): string | null {
+  if (err == null) return null;
+  if (typeof err === "string") return err;
+  if (typeof err === "object") {
+    const maybe = err as { message?: unknown };
+    if (typeof maybe.message === "string" && maybe.message) return maybe.message;
+  }
+  const text = String(err);
+  return text === "[object Object]" ? null : text;
 }

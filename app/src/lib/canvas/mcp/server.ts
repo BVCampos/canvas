@@ -217,7 +217,7 @@ export async function dispatchMcp(
           slide_id: pickId(args, "slide_id"),
           duration_ms: Date.now() - started,
           status: "error",
-          error_code: err instanceof Error ? err.name : "Error",
+          error: err,
           props: { tool_name: name, ...mcpArgShape(name, args) },
         });
         return ok(id, {

@@ -191,6 +191,12 @@ export const EXPORT_PRINT_CSS = `
 
   .cv-chrome, .hint, #hint, .edit-hint,
   [data-canvas="deck-chrome"] { display: none !important; }
+
+  /* Neutralize the on-screen letterbox zoom (EXPORT_FIT_JS sets --slide-zoom
+     to a fit-both value < 1). Paged media lays each slide out at native size
+     one-per-page, so the screen zoom must not shrink it into the printed
+     page. Independent of --slide-zoom's current value. */
+  [data-canvas-position], .slide { zoom: 1 !important; }
 }
 `.trim();
 
@@ -389,6 +395,20 @@ export const EXPORT_CHROME_JS = `
         render();
         return;
       }
+      // Strategy 0 — the assembled deck ships CANVAS_CONTROLLER (assemble.ts),
+      // whose navigate() writes the carousel transform directly and already
+      // handles zoom scaling, sparse positions, and vertical-stack decks. A
+      // standalone export has no Canvas host posting canvas:navigate, so we
+      // call it ourselves. THIS is the path that actually moves the slides;
+      // A/B/C below are fallbacks for decks assembled before it was exposed.
+      if (typeof window.__canvasNavigate === 'function') {
+        var sec = sections[target];
+        var pos = sec && sec.getAttribute ? sec.getAttribute('data-canvas-position') : null;
+        window.__canvasNavigate(pos !== null && pos !== '' ? parseInt(pos, 10) : target);
+        current = target;
+        render();
+        return;
+      }
       // Strategy A — if the deck's own nav.js renders #dotsNav buttons, click
       // the matching one so its internal state (animations, active dot, any
       // goTo hooks) updates. Hidden iframe-stubs from assemble.ts also match
@@ -446,5 +466,96 @@ export const EXPORT_CHROME_JS = `
   } else {
     init();
   }
+})();
+`.trim();
+
+// Standalone letterbox — screen-only, injected by assemble.ts in export mode
+// ONLY for decks that use `--slide-zoom` (the kit's zoom-scaled carousel). See
+// the exportFitStyle/Script gate in assemble.ts for why.
+//
+// The stage: .deck is pinned to exactly one RENDERED slide (--cv-fit-w/h) and
+// centered, with overflow:hidden. That does two things at once —
+//   1. clips the strip so the next slide (which sits one rendered-slide-width
+//      away) can't bleed into a viewport wider than the fitted slide, and
+//   2. centers the fitted slide so the letterbox margin is symmetric; the bars
+//      show the deck's own body background.
+// EXPORT_FIT_JS fills --cv-fit-w/h. The 100vw/100vh fallbacks keep .deck full-
+// bleed until the script runs (and if it somehow doesn't). All @media screen,
+// so EXPORT_PRINT_CSS (paged media) governs the print/PDF path untouched.
+export const EXPORT_FIT_CSS = `
+@media screen {
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+  .deck {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    width: var(--cv-fit-w, 100vw) !important;
+    height: var(--cv-fit-h, 100vh) !important;
+    transform: translate(-50%, -50%) !important;
+    overflow: hidden !important;
+  }
+}
+`.trim();
+
+// The fit driver. Kit decks scale `.slide { zoom: var(--slide-zoom) }` and
+// their nav.js sets --slide-zoom = innerWidth/1920 (WIDTH-fit), which crops
+// vertically in a window shorter than 16:9. We recompute a fit-BOTH zoom and
+// size the .deck stage (consumed by EXPORT_FIT_CSS) to one rendered slide.
+//
+// Winning the tug-of-war with the deck's own setZoom: the deck re-asserts its
+// width-only value on load, deferred timers (~200/800ms), and resize. We
+// re-run on the same triggers AND observe the <html> style attribute, so any
+// write of a value that isn't our fit value is corrected. The guard (skip when
+// --slide-zoom already equals our value) stops the observer from looping on
+// our own writes. Changing --slide-zoom also nudges CANVAS_CONTROLLER's own
+// style MutationObserver, which re-runs navigate(lastPosition) at the new
+// scale — so the strip re-centers on the current slide for free.
+export const EXPORT_FIT_JS = `
+(function () {
+  function design() {
+    // The WORST-CASE slide footprint in design px, so no slide crops at the
+    // chosen zoom. offsetWidth/Height are the UNZOOMED layout box (zoom scales
+    // render, not offset*), and getComputedStyle margins are design px too. We
+    // add margins because the kit gives non-first slides a top margin (e.g.
+    // margin-top:32) that sits ABOVE the 1080px box — ignore it and that slide
+    // overflows the fitted stage by margin*zoom. Max across slides covers a
+    // deck whose slides differ (first slide margin:0 vs the rest). Falls back
+    // to the kit's 1920x1080 before layout settles.
+    var secs = document.querySelectorAll('[data-canvas-position]');
+    var w = 0, h = 0;
+    for (var i = 0; i < secs.length; i++) {
+      var s = secs[i], cs = window.getComputedStyle(s);
+      var sw = s.offsetWidth + (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0);
+      var sh = s.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+      if (sw > w) w = sw;
+      if (sh > h) h = sh;
+    }
+    return { w: w || 1920, h: h || 1080 };
+  }
+  function apply() {
+    var d = design();
+    if (!d.w || !d.h) return;
+    var z = Math.min(window.innerWidth / d.w, window.innerHeight / d.h);
+    if (!(z > 0) || !isFinite(z)) return;
+    var zs = z.toFixed(5);
+    var root = document.documentElement.style;
+    // Already fitted at this scale — bail (breaks the observer feedback loop).
+    if (root.getPropertyValue('--slide-zoom').trim() === zs &&
+        root.getPropertyValue('--cv-fit-w')) return;
+    root.setProperty('--slide-zoom', zs);
+    root.setProperty('--cv-fit-w', Math.round(z * d.w) + 'px');
+    root.setProperty('--cv-fit-h', Math.round(z * d.h) + 'px');
+  }
+  window.addEventListener('resize', apply);
+  window.addEventListener('load', apply);
+  // Re-assert over the kit's deferred setZoom (fires ~load / +200 / +800).
+  [0, 60, 250, 850, 1200].forEach(function (ms) { setTimeout(apply, ms); });
+  try {
+    if (typeof MutationObserver !== 'undefined') {
+      var mo = new MutationObserver(function () { apply(); });
+      mo.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+    }
+  } catch (e) { /* no MutationObserver / non-DOM env */ }
+  apply();
 })();
 `.trim();

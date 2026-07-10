@@ -52,6 +52,7 @@ export async function POST(
       event: "mcp.auth_fail",
       surface: "mcp",
       status: "error",
+      error: tErr,
       error_code: tErr.code ?? "lookup_failed",
       props: { reason: "lookup_failed" },
     });
@@ -88,6 +89,7 @@ export async function POST(
       user_id: tokenRow.user_id,
       workspace_id: tokenRow.workspace_id,
       status: "error",
+      error: mErr,
       error_code: mErr.code ?? "membership_lookup_failed",
       props: { reason: "membership_lookup_failed" },
     });

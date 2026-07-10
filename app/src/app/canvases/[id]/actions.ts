@@ -144,6 +144,7 @@ export async function lockSlide(slideId: string, deckId: string): Promise<LockSl
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
     });
     return { ok: false, kind: "other", error: error.message };
@@ -196,6 +197,7 @@ export async function releaseSlide(slideId: string, deckId: string): Promise<Act
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
     });
     return { ok: false, error: error.message };
@@ -266,6 +268,7 @@ export async function renewSlideLock(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
     });
     return { ok: false, error: error.message };
@@ -341,6 +344,7 @@ export async function forceReleaseSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: slideErr,
       error_code: slideErr.code ?? "slide_lookup_failed",
       props: { result_kind: "slide_lookup_failed" },
     });
@@ -375,6 +379,7 @@ export async function forceReleaseSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: rpcErr,
       error_code: rpcErr.code ?? "rpc_error",
       props: { result_kind: "rpc_error" },
     });
@@ -416,6 +421,7 @@ export async function forceReleaseSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_failed",
       props: { result_kind: "delete_failed" },
     });
@@ -489,6 +495,7 @@ export async function createSnapshot(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { kind: "manual", has_description: Boolean(description?.trim()) },
     });
@@ -544,6 +551,7 @@ export async function restoreSlideVersion(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { version_id: versionId },
     });
@@ -778,6 +786,7 @@ export async function restoreSnapshot(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { snapshot_id: snapshotId },
     });
@@ -953,6 +962,7 @@ export async function createComment(input: CreateCommentInput): Promise<
       slide_id: input.slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
       props: { is_reply: isReply, has_anchor: bothSet, body_len: body.length },
     });
@@ -1024,6 +1034,7 @@ export async function resolveComment(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { comment_id: commentId },
     });
@@ -1095,6 +1106,7 @@ export async function unresolveComment(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { comment_id: commentId },
     });
@@ -1160,6 +1172,7 @@ export async function deleteComment(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { comment_id: commentId },
     });
@@ -1238,6 +1251,7 @@ export async function renameDeck(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
     });
     return { ok: false, error: error.message };
@@ -1381,6 +1395,7 @@ export async function duplicateDeck(
         deck_id: deckId,
         status: "error",
         duration_ms: Date.now() - started,
+        error: slideInsertErr,
         error_code: slideInsertErr.code ?? "slide_insert_error",
       });
       return { ok: false, error: slideInsertErr.message };
@@ -1723,6 +1738,7 @@ export async function setDeckPublicComments(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { enabled },
     });
@@ -1779,10 +1795,15 @@ export async function listCopySources(
 
   // Everything the caller can read except the deck being edited; RLS is the
   // filter. Recency-ordered and capped — this is a picker, not a browser.
+  // Archived decks are excluded (0074): they're shelved out of the browse/pick
+  // surfaces, and since archiving bumps updated_at they'd otherwise jump to the
+  // top of this recency-ordered list — the opposite of decluttering. Copy from
+  // an archived deck by unarchiving it first.
   const { data: decks, error: decksErr } = await supabase
     .from("canvas_deck")
     .select("id, title")
     .neq("id", currentDeckId)
+    .is("archived_at", null)
     .order("updated_at", { ascending: false })
     .limit(30);
   if (decksErr) {
@@ -1885,6 +1906,7 @@ export async function copySlideFromDeck(
       deck_id: destDeckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
     });
     return {
@@ -2019,6 +2041,7 @@ export async function setDeckPublicShare(
         deck_id: deckId,
         status: "error",
         duration_ms: Date.now() - started,
+        error,
         error_code: error.code ?? "update_error",
         props: { enabled },
       });
@@ -2063,6 +2086,7 @@ export async function setDeckPublicShare(
         duration_ms: Date.now() - started,
         // 23505 = the (astronomically unlikely) token collision on the unique
         // index. Surface it plainly; the caller can simply retry.
+        error,
         error_code: error.code ?? "update_error",
         props: { enabled, duplicate: error.code === "23505" },
       });
@@ -2143,6 +2167,7 @@ export async function rotateDeckPublicShareLink(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
     });
     return { ok: false, error: error.message };
@@ -2203,6 +2228,7 @@ export async function setDeckVisibility(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { visibility },
     });
@@ -2282,6 +2308,7 @@ export async function setDeckStatus(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { status },
     });
@@ -2311,6 +2338,124 @@ export async function setDeckStatus(
     status: "ok",
     duration_ms: Date.now() - started,
     props: { status },
+  });
+
+  revalidatePath(`/canvases/${deckId}`);
+  revalidatePath("/canvases");
+  return { ok: true };
+}
+
+// Archive / unarchive a deck (migration 0074). Another near-exact copy of
+// setDeckStatus: a single nullable-timestamp column write through the user's
+// RLS-aware client, so the canvas_deck UPDATE policy is the authoritative gate
+// (a zero-rows result means RLS blocked the row → "not_authorized"). Archiving
+// is reversible and access-preserving — it only hides the deck from the default
+// /canvases list and MCP list_decks; it never changes visibility or revokes a
+// public link. `archived_at` records WHEN so the archived view can order by it
+// and show "Archived {relativeDate}".
+export async function setDeckArchived(
+  deckId: string,
+  archived: boolean,
+): Promise<ActionResult> {
+  const started = Date.now();
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "not_authenticated" };
+
+  // Authorize creator-or-admin IN CODE — not via RLS alone. Archiving removes
+  // the deck from EVERYONE's active list (delete-like blast radius, minus the
+  // destruction), so it's creator/admin-only, matching the Delete gate and the
+  // UI's `canManageDeck`. The shared canvas_deck UPDATE policy also admits
+  // deck-editor members and Postgres RLS isn't column-scoped, so — exactly like
+  // setDeckAgentFastLane — without this check a non-creator editor could
+  // archive. (setDeckStatus / setDeckVisibility stay editor-level by design;
+  // archive is deliberately tighter.)
+  const { data: deck } = await supabase
+    .from("canvas_deck")
+    .select("workspace_id, created_by")
+    .eq("id", deckId)
+    .maybeSingle();
+  const workspace_id = deck?.workspace_id ?? null;
+  if (!deck?.workspace_id) {
+    // Deck missing or RLS-hidden from the caller — indistinguishable, and both
+    // mean "you can't act on this".
+    return { ok: false, error: "not_authorized" };
+  }
+  let authorized = deck.created_by === user.id;
+  if (!authorized) {
+    const { data: isAdmin, error: rpcErr } = await supabase.rpc(
+      "is_workspace_admin_or_owner",
+      { _workspace_id: deck.workspace_id },
+    );
+    if (rpcErr) {
+      console.error("[setDeckArchived] rpc", rpcErr);
+      return { ok: false, error: rpcErr.message };
+    }
+    authorized = Boolean(isAdmin);
+  }
+  if (!authorized) {
+    logUsage({
+      event: "deck.set_archived",
+      surface: "action",
+      user_id: user.id,
+      workspace_id,
+      deck_id: deckId,
+      status: "denied",
+      duration_ms: Date.now() - started,
+      error_code: "not_authorized",
+      props: { archived },
+    });
+    return { ok: false, error: "not_authorized" };
+  }
+
+  const { data: updated, error } = await supabase
+    .from("canvas_deck")
+    .update({ archived_at: archived ? new Date().toISOString() : null })
+    .eq("id", deckId)
+    .select("id");
+
+  if (error) {
+    console.error("[setDeckArchived]", error);
+    logUsage({
+      event: "deck.set_archived",
+      surface: "action",
+      user_id: user.id,
+      workspace_id,
+      deck_id: deckId,
+      status: "error",
+      duration_ms: Date.now() - started,
+      error,
+      error_code: error.code ?? "update_error",
+      props: { archived },
+    });
+    return { ok: false, error: error.message };
+  }
+  if (!updated || updated.length === 0) {
+    logUsage({
+      event: "deck.set_archived",
+      surface: "action",
+      user_id: user.id,
+      workspace_id,
+      deck_id: deckId,
+      status: "denied",
+      duration_ms: Date.now() - started,
+      error_code: "not_authorized",
+      props: { archived },
+    });
+    return { ok: false, error: "not_authorized" };
+  }
+
+  logUsage({
+    event: "deck.set_archived",
+    surface: "action",
+    user_id: user.id,
+    workspace_id,
+    deck_id: deckId,
+    status: "ok",
+    duration_ms: Date.now() - started,
+    props: { archived },
   });
 
   revalidatePath(`/canvases/${deckId}`);
@@ -2372,6 +2517,17 @@ export async function setDeckAgentFastLane(
   }
   if (!data || data.length === 0) {
     return { ok: false, error: "not_authorized" };
+  }
+
+  // Record the choice as this user's standing default: decks they create from
+  // now on inherit it via the canvas_deck insert trigger (0075). Best-effort —
+  // the deck flag above is the authority, so a pref write failure only costs
+  // the inheritance, never the toggle.
+  const { error: prefErr } = await supabase
+    .from("canvas_user_fast_lane_default")
+    .upsert({ user_id: user.id, enabled, updated_at: new Date().toISOString() });
+  if (prefErr) {
+    console.error("[setDeckAgentFastLane] default", prefErr);
   }
 
   revalidatePath(`/canvases/${deckId}`);
@@ -2456,6 +2612,7 @@ export async function duplicateSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: directErr,
       error_code: directErr.code ?? "rpc_error",
     });
     return { ok: false, error: directErr.message };
@@ -2490,6 +2647,7 @@ export async function duplicateSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr.code ?? "insert_error",
     });
     return { ok: false, error: insertErr.message };
@@ -2594,6 +2752,7 @@ export async function proposeDeleteSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: directErr,
       error_code: directErr.code ?? "rpc_error",
     });
     return { ok: false, error: directErr.message };
@@ -2623,6 +2782,7 @@ export async function proposeDeleteSlide(
       slide_id: slideId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr.code ?? "insert_error",
     });
     return { ok: false, error: insertErr.message };
@@ -2867,6 +3027,7 @@ export async function addDeckMember(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
       props: { invited_user_id: userId, role },
     });
@@ -2938,6 +3099,7 @@ export async function updateDeckMemberRole(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { member_user_id: userId, role },
     });
@@ -3005,6 +3167,7 @@ export async function removeDeckMember(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { member_user_id: userId },
     });
@@ -3150,6 +3313,7 @@ export async function inviteGuestToDeck(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr.code ?? "insert_error",
       props: { role, duplicate: insertErr.code === "23505" },
     });
@@ -3229,6 +3393,7 @@ export async function revokeGuestInvite(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { invite_id: inviteId },
     });
@@ -3303,6 +3468,7 @@ export async function deleteDeck(deckId: string): Promise<ActionResult> {
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: delErr,
       error_code: delErr.code ?? "delete_error",
     });
     return { ok: false, error: delErr.message };

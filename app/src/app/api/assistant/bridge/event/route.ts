@@ -331,6 +331,10 @@ async function handleError(
     workspace_id: workspaceId,
     deck_id: (assistant ?? userMsg)?.deck_id ?? null,
     status: "error",
+    // errText is the bridge's reported failure — the message row that also
+    // holds it is deletable (thread cascade), so stamp it on the event too.
+    error: errText,
+    error_code: "bridge_reported",
   });
   return NextResponse.json({ ok: true });
 }

@@ -8,6 +8,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assembleDeckHtml } from "@/lib/canvas/assemble";
+import { logViewportShimFallback } from "@/lib/canvas/shim-fallback-log";
 import { assetSigQuery } from "@/lib/canvas/asset-sign";
 import { stripDrawOverlay } from "@/lib/canvas/draw/scene";
 
@@ -214,6 +215,16 @@ export async function GET(
       }));
     }
   }
+
+  // Signal when this deck lands on the squeeze fallback that scrambles fixed-px
+  // decks (fires only on that path; see logViewportShimFallback).
+  logViewportShimFallback({
+    theme_css: themeCss,
+    nav_js: navJs,
+    surface: "api",
+    deck_id: id,
+    user_id: user.id,
+  });
 
   const html = assembleDeckHtml({
     title: deck.title,

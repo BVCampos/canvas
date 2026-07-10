@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   useTransition,
 } from "react";
 import {
@@ -17,6 +18,8 @@ import {
   ClipboardCheck,
   Code2,
   Copy,
+  Archive,
+  ArchiveRestore,
   FileDown,
   GripVertical,
   History as HistoryIcon,
@@ -24,6 +27,8 @@ import {
   Lock,
   MessageSquare,
   MoreHorizontal,
+  PanelLeft,
+  PanelRight,
   Pencil,
   Play,
   Plus,
@@ -42,6 +47,13 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { cn, displayName, relativeDate } from "@/lib/utils";
 import type { MentionMember } from "@/lib/canvas/mention";
 import { eligibleForBatch } from "@/lib/canvas/batch-approve";
+import {
+  readRailOpen,
+  reconcileRailPrefs,
+  setRailOpen,
+  subscribeRailPrefs,
+  toggleRail,
+} from "@/lib/canvas/rail-prefs";
 import { computeProposalPermissions } from "@/lib/canvas/proposal-permissions";
 import {
   createSlideDirect,
@@ -57,6 +69,7 @@ import {
   renameDeck,
   reorderSlidesDirect,
   saveSlideHtmlDirect,
+  setDeckArchived,
   setDeckStatus,
   setDeckAgentFastLane,
   type DeckStatus,
@@ -114,6 +127,10 @@ import { decideRemount, selfAppliedKey } from "@/lib/canvas/preview-remount";
 import {
   approvalCountsTowardFastLaneOffer,
   FAST_LANE_OFFER_THRESHOLD,
+  markFastLaneOfferDismissed,
+  readFastLaneOfferDismissed,
+  reconcileFastLaneOfferDismissal,
+  subscribeFastLaneOfferDismissal,
 } from "@/lib/canvas/fast-lane-offer";
 import { AssistantPanel, type AssistantPickTarget } from "./assistant-panel";
 import { LENS_KINDS } from "@/lib/canvas/proposal-types";
@@ -127,6 +144,10 @@ type DeckMeta = {
   visibility: "workspace" | "private";
   created_by: string | null;
   agent_fast_lane_enabled: boolean;
+  // Nullable archive marker (migration 0074): a timestamp = archived. An
+  // archived deck stays fully editable here — the badge + menu item just make
+  // the shelved state visible and reversible from inside the editor.
+  archived_at: string | null;
 };
 
 type ExportJob = {
@@ -174,6 +195,7 @@ export function DeckWorkspace({
   initialAssistantRuntime = "bridge",
   brandBlurb = null,
   members = [],
+  fastLaneQualifyingCount = 0,
 }: {
   deck: DeckMeta;
   slides: SlideRow[];
@@ -200,6 +222,9 @@ export function DeckWorkspace({
   initialAssistantRuntime?: "bridge" | "openrouter";
   // Compact workspace-brand context for the assistant (see buildBrandBlurb).
   brandBlurb?: string | null;
+  // Server-counted qualifying self-approvals by this viewer on this deck (the
+  // fast-lane offer's seed — see fast-lane-offer.ts). 0 when the lane is on.
+  fastLaneQualifyingCount?: number;
 }) {
   const router = useRouter();
 
@@ -265,6 +290,12 @@ export function DeckWorkspace({
     currentUserRole === "admin" || currentUserRole === "owner";
   const canForceRelease = isWorkspaceAdmin;
   const canManageFastLane =
+    isWorkspaceAdmin || deck.created_by === currentUserId;
+  // Creator-or-admin gate for deck-lifecycle acts (archive), matching the
+  // /canvases row menu and the setDeckArchived in-code check. Deliberately
+  // tighter than deck-edit rights: an editor-member can edit slides but not
+  // shelve the whole deck out of everyone's list.
+  const canManageDeck =
     isWorkspaceAdmin || deck.created_by === currentUserId;
   // Any full member can moderate (delete/resolve) any comment — mirrors the
   // 0036 RLS policy. Guests only get author-level rights via the per-comment
@@ -445,6 +476,32 @@ export function DeckWorkspace({
     if (deckPendingCount > 0) setActivityOpen(true);
     else if (seenPendingCount > 0) setActivityOpen(false);
   }
+  // Whole-rail visibility (lg+ only — below lg the drawers already cover
+  // this). Independent of the section collapses above: those fold content
+  // within the rail; these remove the rail so the preview gets the width.
+  // Persisted per browser in localStorage (lib/canvas/rail-prefs), read
+  // through useSyncExternalStore — the theme-toggle pattern. Deliberately NOT
+  // auto-reopened when proposals arrive — the toolbar Review pill surfaces
+  // pending work, and clicking it brings the rail back.
+  const slideRailOpen = useSyncExternalStore(
+    subscribeRailPrefs,
+    () => readRailOpen("slides"),
+    // Server pass: open — matches the storage-blocked fallback.
+    () => true,
+  );
+  const rightRailOpen = useSyncExternalStore(
+    subscribeRailPrefs,
+    () => readRailOpen("activity"),
+    () => true,
+  );
+  // Apply the persisted preferences after hydration (see reconcileRailPrefs —
+  // a store notify, not a setState-in-effect). The fast-lane offer's dismissal
+  // flag reads through the same store shape and needs the same nudge, or its
+  // "dismissed" server snapshot sticks and the banner never shows.
+  useEffect(() => {
+    reconcileRailPrefs();
+    reconcileFastLaneOfferDismissal();
+  }, []);
   // The element the user pinpointed in the preview (toolbar "Ask agent" pick
   // mode), handed to the assistant composer as a context chip. `pickNonce`
   // bumps on every fresh pick so the panel can focus its composer (and open the
@@ -453,6 +510,7 @@ export function DeckWorkspace({
     useState<AssistantPickTarget | null>(null);
   const [assistantPickNonce, setAssistantPickNonce] = useState(0);
   const openAssistant = () => {
+    setRailOpen("activity", true);
     setAssistantOpen(true);
     setAssistantPickNonce((n) => n + 1);
   };
@@ -722,6 +780,27 @@ export function DeckWorkspace({
     });
   };
 
+  const deckArchived = deck.archived_at != null;
+
+  // Archive / unarchive from the deck overflow menu — same shape as
+  // handleSetStatus. Archiving is reversible and access-preserving (0074), so
+  // it needs no confirm; the deck stays open and editable, it just leaves (or
+  // rejoins) the active /canvases list.
+  const handleToggleArchive = () => {
+    setFeedback(null);
+    startTransition(async () => {
+      const res = await setDeckArchived(deck.id, !deckArchived);
+      if (res.ok) {
+        setFeedback(deckArchived ? "Deck unarchived" : "Deck archived");
+        router.refresh();
+      } else {
+        setFeedback(
+          `${deckArchived ? "Unarchive" : "Archive"} failed: ${res.error}`,
+        );
+      }
+    });
+  };
+
   // Per-slide duplicate (left rail). DIRECT for deck editors since migration
   // 0071 (a copy is additive — nobody's work is clobbered); a member the RPC
   // refuses still gets the pending proposal a reviewer approves. The action
@@ -971,6 +1050,7 @@ export function DeckWorkspace({
           html: data.html,
         });
         setAssistantPickNonce((n) => n + 1);
+        setRailOpen("activity", true);
         setAssistantOpen(true);
         showPickResult(
           `Pinpointed ${descriptor} — describe the change in Ask agent.`,
@@ -1712,6 +1792,13 @@ export function DeckWorkspace({
     [pendingProposals, selectedProposalIds, permissionsById],
   );
 
+  // Qualifying-approval count for the inline fast-lane offer, seeded from the
+  // server (this viewer's historical qualifying self-approvals on this deck).
+  // Declared here — above BOTH approve paths that bump it — because a closure
+  // capturing a hook value declared later in the component bails the React
+  // Compiler. The offer's visibility wiring lives below, next to handleDecided.
+  const [fastLaneCount, setFastLaneCount] = useState(fastLaneQualifyingCount);
+
   const handleApproveSelected = () => {
     if (isPending || selectedApprovable.length === 0) return;
     setFeedback(null);
@@ -1719,15 +1806,29 @@ export function DeckWorkspace({
     startTransition(async () => {
       let approved = 0;
       let failed = 0;
+      let qualifying = 0;
       // Sequential, like the Claude batch: each apply sees the prior's
       // committed state, and concurrent canvas_apply_edit on the same slide
       // would race the optimistic-version guard. approveProposal re-checks
       // authority + staleness server-side, so a now-ineligible row just fails.
       for (const p of batch) {
         const result = await approveProposal(p.id, deck.id);
-        if (result.ok) approved += 1;
-        else failed += 1;
+        if (result.ok) {
+          approved += 1;
+          // Batch approvals count toward the fast-lane offer too — the
+          // high-volume sessions people batch in are exactly the ones the
+          // lane serves (the first cut only counted single-chip approvals).
+          // Live values, not fastLaneCtxRef: the ref is declared further down
+          // and a forward capture would bail the React Compiler.
+          const countable = approvalCountsTowardFastLaneOffer(p, {
+            deckFastLaneEnabled: deck.agent_fast_lane_enabled,
+            canManageFastLane,
+            workspaceSelfApproval: allowSelfApproval,
+          });
+          if (countable) qualifying += 1;
+        } else failed += 1;
       }
+      if (qualifying > 0) setFastLaneCount((count) => count + qualifying);
       setSelectedProposalIds(new Set());
       setLastToggledId(null);
       setActiveProposalId(null);
@@ -1842,6 +1943,7 @@ export function DeckWorkspace({
   // path J takes from a no-selection state. No-op while a proposal is
   // already active.
   const activateReview = useCallback(() => {
+    setRailOpen("activity", true);
     setActivityOpen(true);
     if (activeProposalId != null) return;
     const first = pendingProposals[0];
@@ -1892,12 +1994,26 @@ export function DeckWorkspace({
 
   // Inline fast-lane offer (speed #1): after the Nth hand-approval of a
   // render-verified agent patch on a deck the owner could opt in, offer the
-  // one-click enable where the pain is — not the buried ⋯ toggle. Count +
-  // "already offered" flag are per-deck localStorage so they survive reloads
-  // and never re-nag once actioned/dismissed.
-  const [showFastLaneOffer, setShowFastLaneOffer] = useState(false);
-  const fastLaneCountKey = `canvas:flcount:${deck.id}`;
-  const fastLaneOfferedKey = `canvas:floffered:${deck.id}`;
+  // one-click enable where the pain is — not the buried ⋯ toggle. The count
+  // (the fastLaneCount state declared above the approve paths) is seeded from
+  // the server (fastLaneQualifyingCount: this viewer's historical qualifying
+  // self-approvals on this deck, so batch approvals and other browsers count)
+  // and incremented live as qualifying approvals land here. Visibility is
+  // fully DERIVED — count, context, and the localStorage dismissal flag (read
+  // through useSyncExternalStore, the theme-toggle pattern) — so history
+  // alone can surface the offer on first render.
+  const fastLaneOfferDismissed = useSyncExternalStore(
+    subscribeFastLaneOfferDismissal,
+    () => readFastLaneOfferDismissed(deck.id),
+    // Server pass: treat as dismissed — the banner is client-only chrome.
+    () => true,
+  );
+  const showFastLaneOffer =
+    !fastLaneOfferDismissed &&
+    fastLaneCount >= FAST_LANE_OFFER_THRESHOLD &&
+    !deck.agent_fast_lane_enabled &&
+    canManageFastLane &&
+    allowSelfApproval;
 
   const handleDecided = useCallback(
     (decision: ProposalDecision) => {
@@ -1908,39 +2024,25 @@ export function DeckWorkspace({
         setDecisionStrip(null);
       }, DECISION_STRIP_MS);
 
-      // Tally qualifying approvals toward the fast-lane offer.
+      // Count a qualifying approval toward the fast-lane offer (visibility is
+      // derived above, so bumping the count is all this has to do).
       if (decision.type !== "approve") return;
-      if (typeof window === "undefined") return;
-      try {
-        if (window.localStorage.getItem(fastLaneOfferedKey)) return;
-        const proposal = pendingProposalsRef.current.find(
-          (p) => p.id === decision.editId,
-        );
-        if (
-          !proposal ||
-          !approvalCountsTowardFastLaneOffer(proposal, fastLaneCtxRef.current)
-        ) {
-          return;
-        }
-        const next = Number(window.localStorage.getItem(fastLaneCountKey) ?? "0") + 1;
-        window.localStorage.setItem(fastLaneCountKey, String(next));
-        if (next >= FAST_LANE_OFFER_THRESHOLD) setShowFastLaneOffer(true);
-      } catch {
-        // localStorage blocked (private mode / quota) — the offer is a nicety,
-        // never let it break the approve flow.
+      const proposal = pendingProposalsRef.current.find(
+        (p) => p.id === decision.editId,
+      );
+      if (
+        proposal &&
+        approvalCountsTowardFastLaneOffer(proposal, fastLaneCtxRef.current)
+      ) {
+        setFastLaneCount((count) => count + 1);
       }
     },
-    [fastLaneCountKey, fastLaneOfferedKey],
+    [],
   );
 
   const dismissFastLaneOffer = useCallback(() => {
-    setShowFastLaneOffer(false);
-    try {
-      window.localStorage.setItem(fastLaneOfferedKey, "1");
-    } catch {
-      /* ignore */
-    }
-  }, [fastLaneOfferedKey]);
+    markFastLaneOfferDismissed(deck.id);
+  }, [deck.id]);
 
   const acceptFastLaneOffer = useCallback(() => {
     dismissFastLaneOffer();
@@ -2360,7 +2462,8 @@ export function DeckWorkspace({
   ]);
 
   // Single-key shortcuts: "P" enters Present mode, "?" opens the shortcuts
-  // reference. Same guards as the arrow-nav handler — ignored while typing in
+  // reference, "B" / "." toggle the slide and activity rails. Same guards as
+  // the arrow-nav handler — ignored while typing in
   // an editable surface or while any modal/popover owns the keyboard — so they
   // never fire mid-edit. Modifier combos are skipped so browser/OS shortcuts
   // pass through untouched.
@@ -2406,6 +2509,14 @@ export function DeckWorkspace({
       } else if (e.key === "p" || e.key === "P") {
         e.preventDefault();
         router.push(`/canvases/${deck.id}/present`);
+      } else if (e.key === "b" || e.key === "B") {
+        // Panel toggles (lg+ rails). Below lg the state flips invisibly —
+        // harmless, and the drawers stay on their own triggers.
+        e.preventDefault();
+        toggleRail("slides");
+      } else if (e.key === ".") {
+        e.preventDefault();
+        toggleRail("activity");
       }
     }
     window.addEventListener("keydown", onKey);
@@ -3251,6 +3362,14 @@ export function DeckWorkspace({
             <h2 className="truncate text-sm font-medium text-foreground">
               {deck.title}
             </h2>
+            {/* Archived decks stay fully editable; the chip just makes the
+                shelved state visible so an edit here isn't a surprise (0074). */}
+            {deckArchived ? (
+              <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <Archive aria-hidden className="h-2.5 w-2.5" />
+                Archived
+              </span>
+            ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <div className="relative" ref={variant === "rail" ? deckMenuRef : undefined}>
@@ -3398,6 +3517,25 @@ export function DeckWorkspace({
                     </span>
                   </button>
                   <div aria-hidden className="h-px w-full bg-border" />
+                  {canManageDeck && (
+                    <button
+                      role="menuitem"
+                      type="button"
+                      disabled={isPending}
+                      onClick={() => {
+                        setDeckMenuOpen(false);
+                        handleToggleArchive();
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {deckArchived ? (
+                        <ArchiveRestore aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <Archive aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      )}
+                      {deckArchived ? "Unarchive deck" : "Archive deck"}
+                    </button>
+                  )}
                   <button
                     role="menuitem"
                     type="button"
@@ -3955,10 +4093,14 @@ export function DeckWorkspace({
     <div className="flex h-[calc(100dvh-56px)] w-full">
       {/* Left — slide list (xl/lg only). Below lg the drawer overlay
        * (further down) replaces it, opened by the hamburger button at the
-       * top-left of the preview chrome. */}
-      <aside className="hidden w-64 shrink-0 flex-col border-r border-border bg-card lg:flex">
-        {renderSlideListBody("rail")}
-      </aside>
+       * top-left of the preview chrome. Collapsible Cursor-style: the
+       * PanelLeft toolbar toggle (or B) removes it entirely so the preview
+       * takes the width. */}
+      {slideRailOpen ? (
+        <aside className="hidden w-64 shrink-0 flex-col border-r border-border bg-card lg:flex">
+          {renderSlideListBody("rail")}
+        </aside>
+      ) : null}
 
       {/* Middle — live preview.
        * Background is transparent so the body-level .app-shell-atmosphere
@@ -3991,6 +4133,22 @@ export function DeckWorkspace({
               >
                 <path d="M2 4h12M2 8h12M2 12h12" />
               </svg>
+            </button>
+            {/* Slide-panel toggle — the lg+ counterpart of the hamburger
+             * above (they share this slot across the breakpoint). Cursor-
+             * style: hides the left rail entirely; B from the keyboard. */}
+            <button
+              type="button"
+              aria-label={slideRailOpen ? "Hide slide panel" : "Show slide panel"}
+              aria-expanded={slideRailOpen}
+              title={`${slideRailOpen ? "Hide" : "Show"} slide panel (B)`}
+              onClick={() => toggleRail("slides")}
+              className={cn(
+                "hidden h-9 w-9 shrink-0 items-center justify-center rounded-[8px] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:inline-flex",
+                slideRailOpen ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              <PanelLeft aria-hidden className="h-4 w-4" />
             </button>
             <div className="min-w-0 flex-1">
               {selected ? (
@@ -4191,7 +4349,7 @@ export function DeckWorkspace({
                     {inspectTextEditing
                       ? "Editing text — Enter or Esc to finish"
                       : inspectSel
-                        ? "Adjust or double-click to edit text, then Save"
+                        ? "Drag to move or resize, double-click to edit text, then Save"
                         : "Click an element on the slide"}
                   </span>
                 ) : null}
@@ -4593,6 +4751,28 @@ export function DeckWorkspace({
                 </MenuSurface>
               ) : null}
             </div>
+
+            {/* Activity-panel toggle (lg+) — sits at the toolbar's outer edge,
+             * adjacent to the rail it controls. Hides Activity + Ask agent
+             * entirely; the Review pill keeps surfacing pending decisions
+             * while it's hidden, and clicking the pill reopens it. "." from
+             * the keyboard. Below lg the "Activity" sheet button above covers
+             * this slot. */}
+            <button
+              type="button"
+              aria-label={
+                rightRailOpen ? "Hide activity panel" : "Show activity panel"
+              }
+              aria-expanded={rightRailOpen}
+              title={`${rightRailOpen ? "Hide" : "Show"} activity panel (.)`}
+              onClick={() => toggleRail("activity")}
+              className={cn(
+                "hidden h-9 w-9 shrink-0 items-center justify-center rounded-[8px] transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:inline-flex",
+                rightRailOpen ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              <PanelRight aria-hidden className="h-4 w-4" />
+            </button>
           </div>
         </div>
         {deckChipVisible ? (
@@ -4617,13 +4797,10 @@ export function DeckWorkspace({
             selectedApprovableCount={selectedApprovable.length}
           />
         ) : null}
-        {showFastLaneOffer &&
-        !deck.agent_fast_lane_enabled &&
-        canManageFastLane &&
-        allowSelfApproval ? (
+        {showFastLaneOffer ? (
           <div className="mx-3 mb-2 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:var(--accent)]/40 bg-[color:var(--accent-wash)] px-3.5 py-2.5 sm:mx-6">
             <p className="min-w-0 flex-1 text-xs leading-relaxed text-foreground">
-              You&apos;ve approved {FAST_LANE_OFFER_THRESHOLD} render-verified agent
+              You&apos;ve approved {fastLaneCount} render-verified agent
               patches on this deck. Let them apply themselves after the agent
               renders and checks them? You can turn this off anytime in the deck
               menu.
@@ -4957,11 +5134,17 @@ export function DeckWorkspace({
             ) : null}
             {/* <lg feedback pill — transient mirror of the rail's feedback
              * line (see mobileFeedbackShown above). Seam-caption styling;
-             * sits above the caption/DeckChrome band so both stay legible. */}
+             * sits above the caption/DeckChrome band so both stay legible.
+             * Also shown at lg+ while the right rail is collapsed — the
+             * rail's feedback line is the only other place confirmations
+             * render, and it's hidden with the rail. */}
             {mobileFeedbackShown && feedback ? (
               <div
                 role="status"
-                className="pointer-events-none absolute bottom-10 left-1/2 z-[7] max-w-[85%] -translate-x-1/2 truncate rounded-full border border-border bg-card/90 px-2.5 py-0.5 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm lg:hidden"
+                className={cn(
+                  "pointer-events-none absolute bottom-10 left-1/2 z-[7] max-w-[85%] -translate-x-1/2 truncate rounded-full border border-border bg-card/90 px-2.5 py-0.5 text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm",
+                  rightRailOpen && "lg:hidden",
+                )}
               >
                 {feedback}
               </div>
@@ -4987,7 +5170,10 @@ export function DeckWorkspace({
        * "Activity" tab button in the toolbar and opens as a slide-over
        * sheet (mobile/tablet at right; bottom on <sm phones). The lg
        * width is narrower (~288px) than the xl width (~320px) to give the
-       * preview more breathing room at laptop widths. */}
+       * preview more breathing room at laptop widths. Collapsible via the
+       * PanelRight toolbar toggle (or "."); the Review pill / activateReview
+       * bring it back when there are decisions to make. */}
+      {rightRailOpen ? (
       <aside className="hidden shrink-0 flex-col border-l border-border bg-card lg:flex lg:w-72 xl:w-80">
         {/* Activity expands automatically for review work. In create mode its
             compact header leaves the full rail to the agent conversation. */}
@@ -5091,6 +5277,7 @@ export function DeckWorkspace({
           ) : null}
         </div>
       </aside>
+      ) : null}
 
       {/* Mobile / tablet slide-list drawer. Mirrors the same Sheet primitive
        * pattern used by ProposalSheet — full-bleed scrim + side-anchored
@@ -5642,6 +5829,8 @@ function ShortcutsDialog({
     { keys: ["Space"], action: "Next slide" },
     { keys: ["Home", "End"], action: "First / last slide" },
     { keys: ["P"], action: "Present full screen" },
+    { keys: ["B"], action: "Show / hide the slide panel" },
+    { keys: ["."], action: "Show / hide the activity panel" },
     { keys: ["J", "K"], action: "Next / previous proposal (also ] / [)" },
     { keys: ["A"], action: "Approve the active proposal" },
     { keys: ["R"], action: "Reject — opens the reason composer" },

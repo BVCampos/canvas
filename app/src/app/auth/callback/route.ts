@@ -40,6 +40,7 @@ export async function GET(request: NextRequest) {
       event: "auth.login",
       surface: "auth",
       status: "error",
+      error,
       error_code: "exchange_failed",
       props: { provider: "oauth" },
     });

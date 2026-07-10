@@ -75,6 +75,11 @@ const SCHEMA_PROBES: { table: string; column: string; migration: string }[] = [
     column: "encrypted_api_key",
     migration: "0059",
   },
+  {
+    table: "canvas_user_fast_lane_default",
+    column: "enabled",
+    migration: "0075",
+  },
 ];
 
 // A PostgREST/Postgres error for a schema object the probe's SELECT needs that

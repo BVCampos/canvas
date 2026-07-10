@@ -391,6 +391,7 @@ export async function approveAllProposals(
         deck_id: deckId,
         status: "error",
         duration_ms: Date.now() - started,
+        error,
         error_code: error.code ?? "rpc_error",
         props: { edit_id: editId, edit_kind: ctx.kind, bulk: true },
       });
@@ -591,6 +592,7 @@ export async function revertProposal(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error: applyErr,
       error_code: applyErr.code ?? "rpc_error",
       props: { edit_id: editId, edit_kind: edit.kind },
     });
@@ -658,6 +660,7 @@ export async function rejectProposal(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { edit_id: editId, edit_kind: ctx.kind, has_reason: !!trimmed },
     });
@@ -704,6 +707,7 @@ export async function withdrawProposal(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { edit_id: editId, edit_kind: ctx.kind },
     });
@@ -837,6 +841,7 @@ export async function commentOnProposal(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
       props: { edit_id: editId, body_len: trimmed.length },
     });

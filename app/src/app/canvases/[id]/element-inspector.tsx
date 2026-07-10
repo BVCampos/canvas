@@ -28,6 +28,7 @@ export type InspectSnapshot = {
   textAlign: string;
   padding: number | null;
   width: number | null;
+  height: number | null;
   positionMode: "absolute" | "flow";
 };
 
@@ -78,6 +79,9 @@ export function ElementInspector({
   );
   const [width, setWidth] = useState(
     snapshot.width != null ? String(snapshot.width) : "",
+  );
+  const [height, setHeight] = useState(
+    snapshot.height != null ? String(snapshot.height) : "",
   );
 
   // Arrow-key nudge while the HOST has focus (the iframe handles its own
@@ -327,12 +331,13 @@ export function ElementInspector({
           0,
         )}
         {numField("Width", "width", width, setWidth, "auto", snapshot.width ?? 0)}
+        {numField("Height", "height", height, setHeight, "auto", snapshot.height ?? 0)}
       </div>
 
       <div className="border-t border-border px-2.5 py-1.5 text-[10px] leading-snug text-muted-foreground">
         {textEditing
           ? "Editing text — Enter or Esc to finish"
-          : "Double-click to edit text · drag to move · arrows nudge (Shift ×10)"}
+          : "Drag to move · corners resize (Shift keeps ratio) · double-click edits text · arrows nudge (Shift ×10)"}
       </div>
     </div>
   );

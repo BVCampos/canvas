@@ -39,6 +39,7 @@ export async function setActiveWorkspaceAction(
       workspace_id: workspaceId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "membership_lookup_failed",
     });
     return { ok: false, error: error.message };
@@ -211,6 +212,7 @@ export async function createWorkspaceAction(
       user_id: user.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr?.code ?? "workspace_insert_failed",
     });
     return {
@@ -234,6 +236,7 @@ export async function createWorkspaceAction(
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: memErr,
       error_code: memErr.code ?? "membership_insert_failed",
     });
     return {
@@ -317,6 +320,7 @@ export async function renameWorkspaceAction(
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_failed",
     });
     return { ok: false, error: error.message };
@@ -373,6 +377,7 @@ export async function setSelfApprovalAction(
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_failed",
     });
     return { ok: false, error: error.message };
@@ -429,6 +434,7 @@ export async function deleteWorkspaceAction(): Promise<
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_failed",
     });
     return { ok: false, error: error.message };
@@ -488,6 +494,7 @@ export async function updateDisplayNameAction(
       user_id: user.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: authError,
       error_code: authError.code ?? "auth_update_failed",
     });
     return { ok: false, error: authError.message };
@@ -504,6 +511,7 @@ export async function updateDisplayNameAction(
       user_id: user.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: profileError,
       error_code: profileError.code ?? "profile_update_failed",
     });
     return { ok: false, error: profileError.message };

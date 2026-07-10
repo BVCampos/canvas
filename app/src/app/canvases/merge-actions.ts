@@ -149,6 +149,7 @@ export async function mergeApproveProposal(
       deck_id: deckId,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "rpc_error",
       props: { edit_id: editId },
     });

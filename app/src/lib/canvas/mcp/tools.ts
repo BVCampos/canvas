@@ -323,7 +323,17 @@ function buildPatchedSlidePayload(
 function optionalBoolean(args: unknown, key: string): boolean {
   if (!args || typeof args !== "object") return false;
   const v = (args as Record<string, unknown>)[key];
-  return v === true;
+  if (v === undefined || v === null) return false;
+  // Fail LOUD on a present-but-non-boolean value rather than coercing it to
+  // false. Stringified booleans (`"true"`) are a known tool-calling failure
+  // mode; silently treating `{ include_archived: "true" }` as false would
+  // return the wrong set with no error (the caller can't tell an active-only
+  // result from a genuinely-empty archive). An explicit error lets them fix the
+  // call. Applies to every optional boolean arg (mine, include_resolved, …).
+  if (typeof v !== "boolean") {
+    throw new ExpectedError(`${key} must be a boolean (true or false), not ${typeof v}`);
+  }
+  return v;
 }
 
 function contentHashMd5(content: string): string {
@@ -867,7 +877,10 @@ export const tools: Record<string, ToolFn> = {
         .from("canvas_deck")
         .select("id, project_id, visibility")
         .eq("workspace_id", ctx.workspace_id)
-        .not("project_id", "is", null),
+        .not("project_id", "is", null)
+        // Archived decks are shelved — don't inflate a project's deck_count
+        // with them (parity with the /canvases active-only counts). 0074.
+        .is("archived_at", null),
     ]);
     if (projectsResp.error) throw new Error(projectsResp.error.message);
     if (decksResp.error) throw new Error(decksResp.error.message);
@@ -941,13 +954,18 @@ export const tools: Record<string, ToolFn> = {
     // instead of returning a confusing empty list.
     const projectArg = optionalString(args, "project_id")?.trim();
     if (projectArg) await assertProjectInWorkspace(projectArg, ctx);
+    // Archived decks are shelved: hidden by default so the agent acts on live
+    // work, opt in with include_archived to see them (each row carries
+    // archived_at so a null vs. timestamp tells them apart). See migration 0074.
+    const includeArchived = optionalBoolean(args, "include_archived");
 
     let query = admin()
       .from("canvas_deck")
-      .select("id, title, status, updated_at, created_at, visibility, project_id")
+      .select("id, title, status, updated_at, created_at, visibility, project_id, archived_at")
       .eq("workspace_id", ctx.workspace_id)
       .order("updated_at", { ascending: false });
     if (projectArg) query = query.eq("project_id", projectArg);
+    if (!includeArchived) query = query.is("archived_at", null);
     const { data, error } = await query;
     if (error) throw new Error(error.message);
     const rows = data ?? [];
@@ -976,7 +994,7 @@ export const tools: Record<string, ToolFn> = {
     const { data: deck, error: deckErr } = await admin()
       .from("canvas_deck")
       .select(
-        "id, title, status, meta, created_at, updated_at, visibility, project_id, agent_fast_lane_enabled",
+        "id, title, status, meta, created_at, updated_at, visibility, project_id, agent_fast_lane_enabled, archived_at",
       )
       .eq("id", deck_id)
       .eq("workspace_id", ctx.workspace_id)
@@ -3406,13 +3424,18 @@ export const toolDescriptors = [
   {
     name: "list_decks",
     description:
-      "List every deck in the active workspace, newest update first. Each row carries its project_id (null = ungrouped); pass project_id to list only one project's decks.",
+      "List the active decks in the active workspace, newest update first. Each row carries its project_id (null = ungrouped) and archived_at (always null unless you include archived decks); pass project_id to list only one project's decks. Archived (shelved) decks are hidden by default — pass include_archived: true to include them.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: {
           type: "string",
           description: "Only return decks in this project. Get ids from list_projects.",
+        },
+        include_archived: {
+          type: "boolean",
+          description:
+            "Include archived (shelved) decks. Default false. When true, each row's archived_at is a timestamp for archived decks and null for active ones.",
         },
       },
       additionalProperties: false,

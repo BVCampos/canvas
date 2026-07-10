@@ -2,6 +2,8 @@ import {
   EXPORT_CHROME_CSS,
   EXPORT_CHROME_HTML,
   EXPORT_CHROME_JS,
+  EXPORT_FIT_CSS,
+  EXPORT_FIT_JS,
   EXPORT_PRINT_CSS,
   EXPORT_PRINT_JS,
 } from "./export-chrome";
@@ -102,9 +104,14 @@ export type AssembleInput = {
  * are unstyled blocks and the slides collapse into a vertical stack of fixed
  * boxes inside an `overflow:hidden` body — only the top-left of slide 1 ever
  * shows, navigation can't scroll, and the deck renders blank (the fixed-px weekly-deck
- * regression). The shim below re-binds such a deck onto Canvas's structure so
- * it scales to the iframe; `#slides > .slide` (specificity 1,1,0) wins over the
- * deck's own `.slide` (0,1,0) without `!important`, so it stays overridable.
+ * regression). The shims below re-bind such a deck onto Canvas's structure —
+ * this squeeze variant for the kit, which scales itself: its embedded
+ * `zoom: var(--slide-zoom)` shrinks the px content to fill the squeezed box,
+ * and vw lengths are zoom-immune, so the 100vw rebind is exactly the box its
+ * adapter expects — and the zoom variant (viewportShimZoomCss) for fixed-px
+ * decks that don't scale themselves. `#slides > .slide` (specificity 1,1,0)
+ * wins over the deck's own `.slide` (0,1,0) without `!important`, so it stays
+ * overridable.
  */
 const VIEWPORT_SHIM_CSS = `
 html, body { width: 100%; height: 100%; margin: 0; }
@@ -119,21 +126,185 @@ body { overflow: hidden; }
 `.trim();
 
 /**
+ * The declaration body of every `.slide { … }` rule in a CSS string. The
+ * `[^}]*` body also reaches a `.slide` block nested inside an at-rule (e.g.
+ * `@media (…) { .slide { … } }`) — intentional for needsViewportShim, whose
+ * gating must see those; detectFixedSlideSize strips at-rule blocks first (see
+ * stripAtRuleBlocks) so it reads base rules only.
+ *
+ * KNOWN LIMITATION: only bare `.slide { … }` blocks are seen. A selector list
+ * or compound selector (`.slide, .card { … }`, `.slide.dark { … }`) is invisible
+ * to this scan — a pre-existing bound on the shim's reach, not introduced here.
+ */
+function slideDeclBlocks(css: string): string[] {
+  return [...css.matchAll(/\.slide\s*\{([^}]*)\}/gi)].map((m) => m[1]);
+}
+
+/**
+ * Drop `@media` / `@supports` / `@container` blocks — including nested braces —
+ * so only base (non-conditional) rules remain. A regex can't balance braces, so
+ * we scan to each at-rule then brace-count to its matching close.
+ * detectFixedSlideSize uses this so a responsive override
+ * (`@media (max-width: 1440px) { .slide { width: 1200px } }`) can't be mistaken
+ * for the deck's authored design size.
+ */
+function stripAtRuleBlocks(css: string): string {
+  const atRule = /@(?:media|supports|container)\b/gi;
+  let out = "";
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+  while ((m = atRule.exec(css)) !== null) {
+    const open = css.indexOf("{", atRule.lastIndex);
+    if (open === -1) break;
+    let depth = 1;
+    let i = open + 1;
+    for (; i < css.length && depth > 0; i++) {
+      if (css[i] === "{") depth++;
+      else if (css[i] === "}") depth--;
+    }
+    out += css.slice(cursor, m.index); // keep everything before the at-rule
+    cursor = i; // resume after its matching close brace
+    atRule.lastIndex = i;
+  }
+  return out + css.slice(cursor);
+}
+
+// The fixed px width a `.slide` block pins: an explicit `width` decl first,
+// else the basis of a `flex` / `flex-basis` shorthand. Decimal px accepted so
+// `width: 1280.5px` parses (integer part ≥ 3 digits, matching needsViewportShim).
+function blockFixedWidth(decls: string): number | null {
+  const w =
+    decls.match(/(?:^|[;{\s])width\s*:\s*(\d{3,}(?:\.\d+)?)px/i) ??
+    decls.match(
+      /(?:^|[;{\s])(?:flex-basis|flex)\s*:\s*(?:[\d.]+\s+[\d.]+\s+)?(\d{3,}(?:\.\d+)?)px/i,
+    );
+  return w ? parseFloat(w[1]) : null;
+}
+
+// The fixed px height a `.slide` block pins, if any. Threshold is \d{3,} (same
+// as width) so a small px height (a `height: 90px` footer-ish rule) is not
+// mistaken for the design height and used to crop the slide.
+function blockFixedHeight(decls: string): number | null {
+  const h = decls.match(/(?:^|[;{\s])height\s*:\s*(\d{3,}(?:\.\d+)?)px/i);
+  return h ? parseFloat(h[1]) : null;
+}
+
+/**
  * True when the deck ships the fixed-pixel standalone-carousel signature and
  * does NOT already conform to Canvas's viewport-unit flex strip — i.e. it needs
- * VIEWPORT_SHIM_CSS. We scan every `.slide { … }` rule: a `100vw` width means
- * the deck is already Canvas-native (leave it alone); otherwise a fixed pixel
- * width pinned via `width` / `flex` / `flex-basis` is the standalone/PPTX
- * tell. The property boundary `(?:^|[;{\\s])` keeps `max-width` / `min-width`
- * from tripping the match, and `flex\\s*:` won't catch `flex-direction`.
+ * VIEWPORT_SHIM_CSS. We scan every `.slide { … }` rule (at-rule-nested ones
+ * included, so a responsive `100vw` still opts the deck out): a `100vw` width
+ * means the deck is already Canvas-native (leave it alone); otherwise a fixed
+ * pixel width pinned via `width` / `flex` / `flex-basis` is the standalone/PPTX
+ * tell. Decimal px counts too (`1280.5px`), matching detectFixedSlideSize. The
+ * property boundary `(?:^|[;{\\s])` keeps `max-width` / `min-width` from
+ * tripping the match, and `flex\\s*:` won't catch `flex-direction`.
+ *
+ * KNOWN LIMITATION: only bare `.slide { … }` blocks are seen; a selector list
+ * or compound selector (`.slide, .card { … }`, `.slide.dark { … }`) is invisible
+ * to this scan (see slideDeclBlocks) — a pre-existing bound on the fix's reach.
  */
 export function needsViewportShim(theme_css: string): boolean {
-  const decls = [...theme_css.matchAll(/\.slide\s*\{([^}]*)\}/gi)]
-    .map((m) => m[1])
-    .join(";");
+  const decls = slideDeclBlocks(theme_css).join(";");
   if (!decls) return false;
   if (/\b100vw\b/i.test(decls)) return false; // already viewport-width → conforms
-  return /(?:^|[;{\s])(?:width|flex|flex-basis)\s*:\s*[^;}]*\d{3,}px/i.test(decls);
+  return /(?:^|[;{\s])(?:width|flex|flex-basis)\s*:\s*[^;}]*\d{3,}(?:\.\d+)?px/i.test(decls);
+}
+
+/**
+ * The design-stage size a fixed-px deck was authored at, for the scale-aware
+ * zoom shim (viewportShimZoomCss). INVARIANT: only ever called on decks where
+ * needsViewportShim is true — it's the second gate behind it (see
+ * assembleDeckHtml), not a standalone classifier.
+ *
+ * Reads BASE rules only: at-rule blocks are stripped first (stripAtRuleBlocks),
+ * so a responsive override (`@media (max-width: 1440px) { .slide { width:
+ * 1200px } }`) can't be read as the authored size and upscale the deck. Width
+ * comes from the first base `.slide` block that pins one (a `width` decl, else a
+ * `flex` / `flex-basis` px basis); height is read from that SAME block, so
+ * `.slide { width: 1920px } .slide { height: 90px }` yields
+ * `{ width: 1920, height: null }` (a stray small height never crops the slide).
+ * Returns null — falling back to the squeeze shim — when no base block pins a
+ * fixed width, or when two base blocks disagree on it (a cheap bail rather than
+ * guessing which is the design width).
+ */
+export function detectFixedSlideSize(
+  theme_css: string,
+): { width: number; height: number | null } | null {
+  const blocks = slideDeclBlocks(stripAtRuleBlocks(theme_css));
+  let width: number | null = null;
+  let widthBlock: string | null = null;
+  for (const decls of blocks) {
+    const w = blockFixedWidth(decls);
+    if (w == null) continue;
+    if (width == null) {
+      width = w;
+      widthBlock = decls;
+    } else if (w !== width) {
+      return null; // base blocks pin different widths → don't guess; squeeze
+    }
+  }
+  if (width == null || widthBlock == null) return null;
+  return { width, height: blockFixedHeight(widthBlock) };
+}
+
+/**
+ * Scale-aware variant of VIEWPORT_SHIM_CSS for fixed-px decks that ship NO
+ * scaling of their own (no `--slide-zoom` anywhere — the kit-derived orphan:
+ * `.slide{width:1920px}` with px typography and nothing to shrink it). The
+ * squeeze shim rebinds the slide BOX to 100vw but leaves the px content at
+ * design scale, so the deck only looks right when the viewport happens to be
+ * ≈ design width — in the editor pane or on a laptop the type wraps and the
+ * slide crops ("scrambled"). Instead we keep the slide at its design size and
+ * scale it the way the kit does in canvas-embedded mode: CSS
+ * `zoom: var(--slide-zoom)` with the companion script below setting
+ * --slide-zoom = innerWidth / designWidth. Each slide then RENDERS at exactly
+ * 100vw, so the controller's translate math, zoom-settle observers, and the
+ * editor's sectionScale() all treat it exactly like a kit deck. `margin: 0`
+ * flattens vertical-stack gaps (`.slide + .slide{margin-top:32px}`) that
+ * would skew the horizontal strip — the same reset the kit's embedded rules
+ * make. Kit decks themselves (--slide-zoom present) keep the squeeze shim:
+ * their embedded `zoom: var(--slide-zoom)` already shrinks the px content to
+ * fill the 100vw box, and vw lengths are zoom-immune, so the rebind is exactly
+ * the box the kit's adapter expects — no second setZoom to double up on.
+ */
+function viewportShimZoomCss(size: { width: number; height: number | null }): string {
+  const height = size.height ? ` height: ${size.height}px;` : "";
+  return `
+html, body { width: 100%; height: 100%; margin: 0; }
+body { overflow: hidden; }
+.deck { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+#slides, .slides { display: flex; width: 100vw; height: 100vh; transition: transform .35s ease; }
+#slides > .slide, #slides > section.slide,
+.slides > .slide, .slides > section.slide {
+  flex: 0 0 ${size.width}px; width: ${size.width}px;${height}
+  min-width: 0; max-width: none; margin: 0; overflow: hidden;
+  zoom: var(--slide-zoom, 1);
+}
+`.trim();
+}
+
+/**
+ * Companion width-fit driver for viewportShimZoomCss — the deck has no setZoom
+ * of its own, so the shim supplies one. Mirrors kit.js's embedded branch
+ * (--slide-zoom = innerWidth/designWidth, set on <html> so CANVAS_CONTROLLER's
+ * style MutationObserver re-asserts the strip offset after each change). In
+ * export mode EXPORT_FIT_JS then wins the var over this width-only value with
+ * its fit-both letterbox — the same tug-of-war it already plays with kit decks.
+ */
+function viewportShimZoomJs(designWidth: number): string {
+  return `
+(function () {
+  function setShimZoom() {
+    var vw = window.innerWidth;
+    if (!vw) return;
+    document.documentElement.style.setProperty("--slide-zoom", (vw / ${designWidth}).toFixed(4));
+  }
+  setShimZoom();
+  window.addEventListener("resize", setShimZoom);
+  window.addEventListener("load", setShimZoom);
+})();
+`.trim();
 }
 
 export function assembleDeckHtml(input: AssembleInput): string {
@@ -174,6 +345,16 @@ export function assembleDeckHtml(input: AssembleInput): string {
     ? `<script>\n${EXPORT_CHROME_JS}\n</script>`
     : "";
 
+  // Standalone marker for the exported file. In export mode there is no Canvas
+  // host posting `canvas:navigate`, so CANVAS_CONTROLLER must drive the
+  // carousel itself — its keyboard handler navigates locally instead of
+  // forwarding keys upward, and the visible `.cv-chrome` buttons call
+  // `window.__canvasNavigate`. Emitted BEFORE the controller script so
+  // isStandalone() reads it. Never set in preview, where the host owns
+  // navigation and the controller only forwards keys.
+  const standaloneFlagScript =
+    mode === "export" ? `<script>window.__canvasStandalone = true;</script>` : "";
+
   // Export mode also ships a print stylesheet so "Export HTML" → "Save as PDF"
   // paginates one slide per 16:9 landscape page instead of collapsing the
   // carousel to a single US-Letter-portrait page of slide 1. Gated on export
@@ -194,6 +375,37 @@ export function assembleDeckHtml(input: AssembleInput): string {
   // directly because headless printToPDF fires neither event.
   const exportPrintScript =
     mode === "export" ? `<script>\n${EXPORT_PRINT_JS}\n</script>` : "";
+
+  // Standalone letterbox fit. Kit decks scale slides with
+  // `.slide { zoom: var(--slide-zoom) }`, and their nav.js sets
+  // --slide-zoom = innerWidth/1920 — WIDTH-fit only. Opened in a window
+  // shorter than the 16:9 design (the common maximized-browser case), the
+  // slide overflows and body{overflow:hidden} crops the bottom of every slide.
+  // In export mode we inject a screen-only letterbox that fits BOTH axes and
+  // sizes .deck to exactly one rendered slide, centered, so nothing crops and
+  // the neighbor in the strip can't bleed in. See EXPORT_FIT_CSS/JS.
+  //
+  // Gated to zoom-scaled carousels — decks that use --slide-zoom themselves
+  // (the kit) plus fixed-px decks the zoom shim below scales the same way. Not
+  // viewport-unit or vertical-stack decks: their slides already fill the
+  // viewport, and fitting a vertical-scroll deck would wrongly shrink it.
+  // Screen-only, so the print / PDF path (EXPORT_PRINT_CSS) is untouched.
+  const usesSlideZoom =
+    /--slide-zoom/.test(input.theme_css) || /--slide-zoom/.test(input.nav_js);
+  // Fixed-px deck with no scaling of its own → the shim scales it (see
+  // viewportShimZoomCss). Kit decks keep the squeeze shim they co-evolved with.
+  const shimNeeded = needsViewportShim(input.theme_css);
+  const shimSize =
+    shimNeeded && !usesSlideZoom ? detectFixedSlideSize(input.theme_css) : null;
+  const zoomScaled = usesSlideZoom || shimSize != null;
+  const exportFitStyle =
+    mode === "export" && zoomScaled
+      ? `<style data-canvas="export-fit">\n${EXPORT_FIT_CSS}\n</style>`
+      : "";
+  const exportFitScript =
+    mode === "export" && zoomScaled
+      ? `<script>\n${EXPORT_FIT_JS}\n</script>`
+      : "";
 
   // When the caller asks to hide the click-to-edit hint (proposal previews),
   // emit a tiny <style> in <head> that wins over any theme_css rule the
@@ -221,8 +433,18 @@ export function assembleDeckHtml(input: AssembleInput): string {
   // standalone export of a fixed-px deck is broken the same way the preview is.
   // Placed after theme_css below so it wins the cascade; the print stylesheet
   // (export) still overrides it inside paged media for one-slide-per-page PDF.
-  const viewportShimStyle = needsViewportShim(input.theme_css)
-    ? `<style data-canvas="viewport-shim">\n${VIEWPORT_SHIM_CSS}\n</style>`
+  //
+  // Two variants: decks that scale themselves (--slide-zoom, i.e. the kit) get
+  // the classic 100vw squeeze their embedded rules expect; fixed-px decks with
+  // no scaling get the zoom shim + width-fit driver so their px content shrinks
+  // to the viewport instead of wrapping/cropping (see viewportShimZoomCss).
+  const viewportShimStyle = shimNeeded
+    ? `<style data-canvas="viewport-shim">\n${
+        shimSize ? viewportShimZoomCss(shimSize) : VIEWPORT_SHIM_CSS
+      }\n</style>`
+    : "";
+  const viewportShimZoomScript = shimSize
+    ? `<script data-canvas="viewport-shim-zoom">\n${viewportShimZoomJs(shimSize.width)}\n</script>`
     : "";
 
   // Re-inject the deck's non-slide body chrome (modal overlays, dots rails —
@@ -296,6 +518,7 @@ ${slideStyles}
   ${deckChromeStyle}
   ${exportChromeStyle}
   ${exportPrintStyle}
+  ${exportFitStyle}
   ${hintSuppressStyle}
 </head>
 <body>
@@ -308,16 +531,19 @@ ${body}
   </div>
   ${deckChromeMarkup}
   ${exportChromeMarkup}
+  ${viewportShimZoomScript}
   ${embeddedGuardScript}
   <script>
 ${input.nav_js}
   </script>
+  ${standaloneFlagScript}
   <script>
 ${CANVAS_CONTROLLER}
   </script>
   ${editorScript}
   ${exportChromeScript}
   ${exportPrintScript}
+  ${exportFitScript}
 </body>
 </html>`;
 }
@@ -712,11 +938,45 @@ const CANVAS_CONTROLLER = `
   // round-tripping a \`canvas:navigate\`. preventDefault on Space stops the
   // iframe from scrolling under us.
   var FORWARD_KEYS = { ArrowLeft: 1, ArrowRight: 1, PageUp: 1, PageDown: 1, Home: 1, End: 1, ' ': 1 };
+
+  // Standalone = the exported .html opened directly, with no Canvas host. Set
+  // by assemble.ts's export-mode flag script that runs before this controller.
+  // In that case there is no parent to forward keys to and no host to round-
+  // trip a canvas:navigate, so the controller drives the carousel itself.
+  function isStandalone() { return window.__canvasStandalone === true; }
+
+  // Standalone keyboard nav: map the key to a target INDEX, convert to that
+  // slide's (possibly sparse) position, and drive navigate() — the exact same
+  // transform / zoom / vertical-stack logic the host uses over postMessage. In
+  // the Canvas host this path is never taken; the key is forwarded up and the
+  // host round-trips a canvas:navigate.
+  function navigateByKey(key) {
+    var secs = orderedSlides();
+    var total = secs.length;
+    if (!total) return;
+    var curEl = findSlideElement(lastPosition);
+    var idx = curEl ? indexOfSlide(curEl) : 0;
+    if (idx < 0) idx = 0;
+    var next = idx;
+    if (key === 'ArrowRight' || key === 'PageDown' || key === ' ') next = idx + 1;
+    else if (key === 'ArrowLeft' || key === 'PageUp') next = idx - 1;
+    else if (key === 'Home') next = 0;
+    else if (key === 'End') next = total - 1;
+    if (next < 0) next = 0;
+    if (next > total - 1) next = total - 1;
+    if (next === idx) return;
+    var target = secs[next];
+    if (!target) return;
+    var pos = target.getAttribute && target.getAttribute('data-canvas-position');
+    navigate(pos !== null && pos !== undefined && pos !== '' ? parseInt(pos, 10) : next);
+  }
+
   window.addEventListener('keydown', function (e) {
     if (!e || !FORWARD_KEYS[e.key]) return;
     if (e.target && (e.target.isContentEditable || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     e.preventDefault();
-    safePost({ type: 'canvas:key', key: e.key });
+    if (isStandalone()) navigateByKey(e.key);
+    else safePost({ type: 'canvas:key', key: e.key });
   });
 
   // Forward pointer/touch activity to the host. A presenter view auto-hides
@@ -809,6 +1069,13 @@ const CANVAS_CONTROLLER = `
   }
   observeStripLayout();
 
+  // Exposed for the standalone export chrome (export-chrome.ts): its buttons
+  // and dots call this to move the carousel through the exact logic the host
+  // drives over postMessage, instead of duplicating the transform / zoom math.
+  // Takes a slide POSITION (the value data-canvas-position holds), same as the
+  // canvas:navigate message. Harmless in preview — nothing there calls it.
+  window.__canvasNavigate = navigate;
+
   // First broadcast — the iframe's onLoad fires before our script runs on
   // initial parse, so emit synchronously too.
   scheduleBounds(0);
@@ -892,8 +1159,9 @@ const CANVAS_CONTROLLER = `
  *     canvas:inspect-ready    { position, ok }
  *     canvas:element-selected { position, descriptor, styles } — posted on
  *       every (re)selection; styles is a computed snapshot (font size, color,
- *       background, alignment, padding, width…) the host inspector initializes
- *       its controls from.
+ *       background, alignment, padding, width, height…) the host inspector
+ *       initializes its controls from. Also re-posted after a handle resize
+ *       so the panel's size fields track the new box.
  *     canvas:inspect-text-state { position, editing } — posted when text
  *       editing of the selection STARTS (editing:true) and COMMITS
  *       (editing:false), so the host can flip its inspector hint between
@@ -907,6 +1175,12 @@ const CANVAS_CONTROLLER = `
  *   pages slides. While text editing, arrows/Enter are left to the browser's
  *   caret so typing works. All changes stay in-DOM until inspect-save; the host
  *   discards by remounting the iframe, exactly like visual edit.
+ *
+ *   A selection also grows 8 resize grips (body-level fixed layer, rAF-synced
+ *   to the element's rect — never serialized). Dragging a grip writes inline
+ *   width/height, clamped to the slide and a minimum size (cvResizeClamp);
+ *   west/north grips keep the opposite edge anchored via left/top (absolute)
+ *   or the managed translate (flow). Shift on a corner locks the aspect ratio.
  */
 const CANVAS_EDITOR = `
 (function () {
@@ -915,8 +1189,10 @@ ${DRAG_GEOMETRY_JS}
   var picking = null; // { section: Element, position: number, hovered: Element|null }
   var inspecting = null; // { section: Element, position: number, hovered: Element|null, selected: Element|null }
   var textEditing = null; // { el: Element } while an inspected element's text is being typed in place
-  var dragging = null; // active pointer drag (see onDragStart)
+  var dragging = null; // active pointer gesture: move OR resize (handle != null)
   var tfState = new WeakMap(); // el -> { base, tx, ty }: translate-based flow moves
+  var handleLayer = null; // fixed-position layer holding the 8 resize handles
+  var handleRaf = 0; // rAF id of the handle-sync loop (runs while a selection exists)
   var suppressClick = false; // swallow the click trailing a pointer gesture (we select on pointerdown)
   var ASSET_SIG_RE = /(\\/api\\/canvas\\/asset\\/[0-9a-fA-F-]{36})\\?[^"'\\s)]*/g;
   var styleInjected = false;
@@ -938,7 +1214,14 @@ ${DRAG_GEOMETRY_JS}
       // the same in both editors.
       + '[data-canvas-text-editing="true"]{outline:2px dashed rgba(200,112,42,0.95) !important;outline-offset:-2px;cursor:text !important;}'
       + '[data-canvas-text-editing="true"] *::selection{background:rgba(200,112,42,0.25);}'
-      + '[data-canvas-dragging="true"], [data-canvas-dragging="true"] *{cursor:grabbing !important;user-select:none !important;}';
+      + '[data-canvas-dragging="true"], [data-canvas-dragging="true"] *{cursor:grabbing !important;user-select:none !important;}'
+      // During a resize the whole document shows the grabbed handle's cursor
+      // (the pointer outruns the 9px handle mid-gesture).
+      + '[data-canvas-resizing] *{user-select:none !important;}'
+      + '[data-canvas-resizing="nwse"], [data-canvas-resizing="nwse"] *{cursor:nwse-resize !important;}'
+      + '[data-canvas-resizing="nesw"], [data-canvas-resizing="nesw"] *{cursor:nesw-resize !important;}'
+      + '[data-canvas-resizing="ns"], [data-canvas-resizing="ns"] *{cursor:ns-resize !important;}'
+      + '[data-canvas-resizing="ew"], [data-canvas-resizing="ew"] *{cursor:ew-resize !important;}';
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -1116,13 +1399,14 @@ ${DRAG_GEOMETRY_JS}
       textAlign: align,
       padding: (pt === pr && pt === pb && pt === pl) ? Math.round(pt) : null,
       width: Math.round(parseFloat(cs.width)) || null,
+      height: Math.round(parseFloat(cs.height)) || null,
       positionMode: (cs.position === 'absolute' || cs.position === 'fixed') ? 'absolute' : 'flow'
     };
   }
 
   // Only props the inspector's controls (and nudge) emit — a hostile or buggy
   // host message can't write arbitrary CSS through this.
-  var INSPECT_PROPS = { 'font-size': 1, 'font-weight': 1, 'color': 1, 'background-color': 1, 'text-align': 1, 'padding': 1, 'width': 1, 'left': 1, 'top': 1, 'margin-left': 1, 'margin-top': 1 };
+  var INSPECT_PROPS = { 'font-size': 1, 'font-weight': 1, 'color': 1, 'background-color': 1, 'text-align': 1, 'padding': 1, 'width': 1, 'height': 1, 'left': 1, 'top': 1, 'margin-left': 1, 'margin-top': 1 };
 
   function applyInspectStyles(styles) {
     if (!inspecting || !inspecting.selected || !styles || typeof styles !== 'object') return;
@@ -1178,6 +1462,62 @@ ${DRAG_GEOMETRY_JS}
     return cvStageScale(sec.getBoundingClientRect().width, sec.offsetWidth);
   }
 
+  // ---- resize handles: 8 grips pinned to the selection's on-screen box -------
+  //
+  // The grips live OUTSIDE the slide <section> (appended to <body>), so
+  // serialize() can never leak them into saved HTML, and their on-screen size
+  // stays constant regardless of the deck's stage scale. A rAF loop (running
+  // only while a selection exists) re-reads the selection's rect each frame —
+  // cheaper than enumerating every reflow source (style writes, text edits,
+  // images loading, host resizes) and immune to missing one.
+  var HANDLE_CURSORS = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
+
+  function ensureHandleLayer() {
+    if (handleLayer) return handleLayer;
+    var layer = document.createElement('div');
+    layer.setAttribute('data-canvas-handles', 'true');
+    layer.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;pointer-events:none;display:none;';
+    for (var k in HANDLE_CURSORS) {
+      var g = document.createElement('div');
+      g.setAttribute('data-canvas-handle', k);
+      g.style.cssText = 'position:absolute;width:9px;height:9px;margin:-5px 0 0 -5px;background:#fff;border:1.5px solid rgba(200,112,42,0.95);border-radius:2px;box-sizing:border-box;pointer-events:auto;cursor:' + HANDLE_CURSORS[k] + ';';
+      layer.appendChild(g);
+    }
+    (document.body || document.documentElement).appendChild(layer);
+    handleLayer = layer;
+    return layer;
+  }
+
+  function syncHandles() {
+    if (!handleLayer) return;
+    var el = inspecting && inspecting.selected;
+    // Grips vanish while typing: they sit ON the box edge, where a click should
+    // place the caret, not start a resize.
+    if (!el || textEditing) { handleLayer.style.display = 'none'; return; }
+    var r = el.getBoundingClientRect();
+    handleLayer.style.display = 'block';
+    var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    for (var i = 0; i < handleLayer.children.length; i++) {
+      var g = handleLayer.children[i];
+      var k = g.getAttribute('data-canvas-handle');
+      g.style.left = (k.indexOf('w') !== -1 ? r.left : (k.indexOf('e') !== -1 ? r.right : cx)) + 'px';
+      g.style.top = (k.indexOf('n') !== -1 ? r.top : (k.indexOf('s') !== -1 ? r.bottom : cy)) + 'px';
+    }
+  }
+
+  function startHandleLoop() {
+    ensureHandleLayer();
+    syncHandles();
+    if (handleRaf || typeof requestAnimationFrame !== 'function') return;
+    var loop = function () { syncHandles(); handleRaf = requestAnimationFrame(loop); };
+    handleRaf = requestAnimationFrame(loop);
+  }
+
+  function stopHandleLoop() {
+    if (handleRaf) { cancelAnimationFrame(handleRaf); handleRaf = 0; }
+    if (handleLayer) handleLayer.style.display = 'none';
+  }
+
   // Arrow keys (host or iframe) move the selection by whole authoring px,
   // clamped to the slide just like a drag.
   function nudgeSelected(dx, dy) {
@@ -1193,7 +1533,9 @@ ${DRAG_GEOMETRY_JS}
   // ---- pointer drag: Model A (free move, clamped to the slide) ---------------
   // Geometry is captured once at pointerdown (the rects don't move under us
   // mid-gesture — only the element's own offset changes), so each move clamps
-  // the TOTAL screen delta and folds it back through the stage scale.
+  // the TOTAL screen delta and folds it back through the stage scale. The same
+  // plumbing carries both gestures: dragging.handle is null for a move and the
+  // grabbed grip's name for a resize.
   function onDragMove(e) {
     if (!dragging) return;
     var dxs = e.clientX - dragging.startX;
@@ -1201,26 +1543,94 @@ ${DRAG_GEOMETRY_JS}
     if (!dragging.moved) {
       if (Math.abs(dxs) + Math.abs(dys) < 3) return; // threshold: a click is not a drag
       dragging.moved = true;
-      if (document.body) document.body.setAttribute('data-canvas-dragging', 'true');
+      if (document.body) {
+        if (dragging.handle) document.body.setAttribute('data-canvas-resizing', HANDLE_CURSORS[dragging.handle].replace('-resize', ''));
+        else document.body.setAttribute('data-canvas-dragging', 'true');
+      }
     }
-    var c = cvClampDelta(dxs, dys, dragging.elRect, dragging.secRect);
-    applyOffset(dragging.el, dragging.mode, dragging.baseX + c.dx / dragging.scale, dragging.baseY + c.dy / dragging.scale);
+    if (dragging.handle) {
+      var rc = cvResizeClamp(dragging.handle, dxs, dys, dragging.elRect, dragging.secRect, 8 * dragging.scale, e.shiftKey ? dragging.ratio : 0);
+      applyResize(rc.dx / dragging.scale, rc.dy / dragging.scale);
+    } else {
+      var c = cvClampDelta(dxs, dys, dragging.elRect, dragging.secRect);
+      applyOffset(dragging.el, dragging.mode, dragging.baseX + c.dx / dragging.scale, dragging.baseY + c.dy / dragging.scale);
+    }
     if (e.cancelable) e.preventDefault();
   }
   function endDrag(e) {
     if (!dragging) return;
-    var el = dragging.el;
-    try { if (e && el.releasePointerCapture && typeof e.pointerId === 'number') el.releasePointerCapture(e.pointerId); } catch (err) { /* unsupported */ }
+    var cap = dragging.captureEl || dragging.el;
+    try { if (e && cap.releasePointerCapture && typeof e.pointerId === 'number') cap.releasePointerCapture(e.pointerId); } catch (err) { /* unsupported */ }
     document.removeEventListener('pointermove', onDragMove, true);
     document.removeEventListener('pointerup', endDrag, true);
     document.removeEventListener('pointercancel', endDrag, true);
-    if (document.body) document.body.removeAttribute('data-canvas-dragging');
+    if (document.body) {
+      document.body.removeAttribute('data-canvas-dragging');
+      document.body.removeAttribute('data-canvas-resizing');
+    }
+    // A finished resize re-posts the snapshot so the host panel's Width/Height
+    // fields reflect the new box (commitTextEdit does the same for text).
+    if (dragging.handle && dragging.moved && inspecting && inspecting.selected === dragging.el) {
+      safePost({ type: 'canvas:element-selected', position: inspecting.position, descriptor: describeEl(dragging.el), styles: snapshotStyles(dragging.el) });
+    }
     dragging = null;
+  }
+
+  // Fold a clamped resize delta (authoring px) into styles. A west/north edge
+  // also shifts the box so the opposite edge stays anchored — left/top for
+  // absolute elements, the managed translate for flow (the same channel as
+  // drag, so a later move composes instead of stacking transforms).
+  function applyResize(dx, dy) {
+    var d = dragging, el = d.el, hnd = d.handle;
+    var hasE = hnd.indexOf('e') !== -1, hasW = hnd.indexOf('w') !== -1;
+    var hasS = hnd.indexOf('s') !== -1, hasN = hnd.indexOf('n') !== -1;
+    if (hasE || hasW) el.style.setProperty('width', Math.round(hasE ? d.baseW + dx : d.baseW - dx) + 'px');
+    if (hasS || hasN) el.style.setProperty('height', Math.round(hasS ? d.baseH + dy : d.baseH - dy) + 'px');
+    if (hasW || hasN) applyOffset(el, d.mode, d.baseX + (hasW ? dx : 0), d.baseY + (hasN ? dy : 0));
+  }
+
+  function onResizeStart(e, grip) {
+    if (!inspecting || !inspecting.selected) return;
+    var hnd = grip.getAttribute('data-canvas-handle');
+    if (!HANDLE_CURSORS[hnd]) return;
+    var el = inspecting.selected;
+    var sec = inspecting.section;
+    suppressClick = true;
+    var mode = moveMode(el);
+    var off = readOffset(el, mode);
+    var scale = sectionScale(sec);
+    var r = el.getBoundingClientRect();
+    var cs = window.getComputedStyle(el);
+    // Authoring-px size: computed style where it resolves; the on-screen rect
+    // folded back through the stage scale as the fallback.
+    var baseW = parseFloat(cs.width);
+    if (!isFinite(baseW)) baseW = (r.right - r.left) / scale;
+    var baseH = parseFloat(cs.height);
+    if (!isFinite(baseH)) baseH = (r.bottom - r.top) / scale;
+    dragging = {
+      el: el, mode: mode, handle: hnd, captureEl: grip,
+      startX: e.clientX, startY: e.clientY,
+      baseX: off.x, baseY: off.y,
+      baseW: baseW, baseH: baseH,
+      ratio: (baseW > 0 && baseH > 0) ? baseW / baseH : 0,
+      secRect: sec.getBoundingClientRect(),
+      elRect: r,
+      scale: scale,
+      moved: false
+    };
+    try { if (grip.setPointerCapture && typeof e.pointerId === 'number') grip.setPointerCapture(e.pointerId); } catch (err) { /* unsupported */ }
+    document.addEventListener('pointermove', onDragMove, true);
+    document.addEventListener('pointerup', endDrag, true);
+    document.addEventListener('pointercancel', endDrag, true);
+    if (e.cancelable) e.preventDefault();
   }
   function onDragStart(e) {
     if (!inspecting) return;
     if (typeof e.button === 'number' && e.button !== 0) return; // primary button only
     var el = e.target;
+    // A press on a resize grip is a resize, not a move — the grips live outside
+    // the section, so they'd fall through the containment check below.
+    if (el instanceof Element && el.hasAttribute('data-canvas-handle')) { onResizeStart(e, el); return; }
     if (!(el instanceof Element) || el === inspecting.section || !inspecting.section.contains(el)) return;
     // A pointerdown inside the element being typed in is a caret placement /
     // text-selection gesture, not a move — leave it to the browser.
@@ -1234,7 +1644,7 @@ ${DRAG_GEOMETRY_JS}
     var off = readOffset(el, mode);
     var sec = inspecting.section;
     dragging = {
-      el: el, mode: mode,
+      el: el, mode: mode, handle: null, captureEl: el,
       startX: e.clientX, startY: e.clientY,
       baseX: off.x, baseY: off.y,
       secRect: sec.getBoundingClientRect(),
@@ -1267,8 +1677,10 @@ ${DRAG_GEOMETRY_JS}
     inspecting.selected = el;
     if (el) {
       el.setAttribute('data-canvas-inspect-selected', 'true');
+      startHandleLoop();
       safePost({ type: 'canvas:element-selected', position: inspecting.position, descriptor: describeEl(el), styles: snapshotStyles(el) });
     } else {
+      stopHandleLoop();
       safePost({ type: 'canvas:inspect-deselected' });
     }
   }
@@ -1438,6 +1850,7 @@ ${DRAG_GEOMETRY_JS}
     // clean (no stray contenteditable) for the discard-by-remount cancel path.
     if (textEditing) commitTextEdit();
     if (dragging) endDrag();
+    stopHandleLoop();
     setInspectHover(null);
     if (inspecting.selected) inspecting.selected.removeAttribute('data-canvas-inspect-selected');
     inspecting.section.removeAttribute('data-canvas-picking');

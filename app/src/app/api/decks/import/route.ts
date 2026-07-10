@@ -302,7 +302,7 @@ export async function POST(request: NextRequest) {
       workspace_id: membership.workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
-      error_code: err instanceof Error ? err.name : "Error",
+      error: err,
       props: { had_file: hasFile },
     });
     return redirectBack(request, "import_failed", err);
