@@ -71,6 +71,7 @@ const ALL_PRESENT = new Set([
   "canvas_deck_slide_lock.locked_by_kind",
   "canvas_assistant_message.execution_runtime",
   "canvas_user_ai_provider_config.encrypted_api_key",
+  "canvas_user_fast_lane_default.enabled",
 ]);
 
 beforeEach(() => {

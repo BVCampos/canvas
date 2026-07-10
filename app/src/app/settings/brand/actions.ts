@@ -54,6 +54,7 @@ export async function saveBrand(input: {
       workspace_id: workspace.id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "upsert_error",
     });
     return { ok: false, error: error.message };

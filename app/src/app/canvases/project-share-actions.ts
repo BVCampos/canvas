@@ -498,6 +498,7 @@ export async function addProjectMember(
       workspace_id: project.workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "insert_error",
       props: { project_id: projectId, invited_user_id: userId, role },
     });
@@ -568,6 +569,7 @@ export async function updateProjectMemberRole(
       workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "update_error",
       props: { project_id: projectId, member_user_id: userId, role },
     });
@@ -631,6 +633,7 @@ export async function removeProjectMember(
       workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { project_id: projectId, member_user_id: userId },
     });
@@ -759,6 +762,7 @@ export async function inviteGuestToProject(
       workspace_id: project.workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
+      error: insertErr,
       error_code: insertErr.code ?? "insert_error",
       props: { project_id: projectId, role, duplicate: insertErr.code === "23505" },
     });
@@ -835,6 +839,7 @@ export async function revokeProjectGuestInvite(
       workspace_id: project.workspace_id,
       status: "error",
       duration_ms: Date.now() - started,
+      error,
       error_code: error.code ?? "delete_error",
       props: { project_id: projectId, invite_id: inviteId },
     });

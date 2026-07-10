@@ -35,6 +35,7 @@ export async function GET(request: NextRequest) {
       event: "auth.confirm",
       surface: "auth",
       status: "error",
+      error,
       error_code: "verify_failed",
       props: { type },
     });

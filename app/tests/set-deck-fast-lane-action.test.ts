@@ -52,6 +52,15 @@ class QueryBuilder {
     const rows = (fakeDb[this.table] ?? []).filter((r) => this.matchRow(r));
     return { data: rows[0] ?? null, error: null };
   }
+  // Insert-or-replace keyed on user_id — enough for the fast-lane default
+  // pref row the action upserts after a successful toggle.
+  async upsert(values: Row): Promise<{ data: null; error: null }> {
+    const table = (fakeDb[this.table] = fakeDb[this.table] ?? []);
+    const existing = table.find((r) => r.user_id === values.user_id);
+    if (existing) Object.assign(existing, values);
+    else table.push({ ...values });
+    return { data: null, error: null };
+  }
   then<T>(onFulfilled?: (value: { data: Row[]; error: null }) => T): Promise<T> {
     return this.execute().then(onFulfilled as (v: { data: Row[]; error: null }) => T);
   }
@@ -130,5 +139,42 @@ describe("setDeckAgentFastLane authorization", () => {
     const res = await setDeckAgentFastLane(DECK_ID, true);
     expect(res).toEqual({ ok: true });
     expect(deckRow()?.agent_fast_lane_enabled).toBe(true);
+  });
+});
+
+describe("setDeckAgentFastLane standing default (0075)", () => {
+  const prefRow = (userId: string) =>
+    (fakeDb.canvas_user_fast_lane_default ?? []).find((r) => r.user_id === userId);
+
+  it("records the actor's choice so their next decks inherit it", async () => {
+    seedDeck(CREATOR);
+    currentUser = { id: CREATOR };
+
+    await setDeckAgentFastLane(DECK_ID, true);
+    expect(prefRow(CREATOR)?.enabled).toBe(true);
+
+    // Flipping back updates the same row — the LAST choice wins.
+    await setDeckAgentFastLane(DECK_ID, false);
+    expect(prefRow(CREATOR)?.enabled).toBe(false);
+    expect(fakeDb.canvas_user_fast_lane_default).toHaveLength(1);
+  });
+
+  it("records the ADMIN's own default when an admin toggles someone else's deck", async () => {
+    seedDeck(CREATOR);
+    currentUser = { id: ADMIN };
+    isAdminResult = true;
+
+    await setDeckAgentFastLane(DECK_ID, true);
+    expect(prefRow(ADMIN)?.enabled).toBe(true);
+    expect(prefRow(CREATOR)).toBeUndefined();
+  });
+
+  it("writes no default when the toggle is rejected", async () => {
+    seedDeck(CREATOR);
+    currentUser = { id: EDITOR };
+    isAdminResult = false;
+
+    await setDeckAgentFastLane(DECK_ID, true);
+    expect(fakeDb.canvas_user_fast_lane_default ?? []).toHaveLength(0);
   });
 });

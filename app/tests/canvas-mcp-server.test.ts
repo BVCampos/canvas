@@ -120,7 +120,11 @@ class QueryBuilder {
   private matchRow(row: Row): boolean {
     for (const f of this.filters) {
       if (f.kind === "eq" && row[f.column] !== f.value) return false;
-      if (f.kind === "is" && row[f.column] !== null) return false;
+      // `is null` matches SQL NULL — and a column a fixture simply omits is
+      // NULL in Postgres, so treat undefined as null here too (mirrors the
+      // not_is branch below). Without this, `.is("archived_at", null)` would
+      // drop every seeded deck that predates the archived_at column.
+      if (f.kind === "is" && row[f.column] !== null && row[f.column] !== undefined) return false;
       if (f.kind === "not_is" && (row[f.column] === null || row[f.column] === undefined)) return false;
       if (f.kind === "in" && !f.values.includes(row[f.column])) return false;
     }
@@ -407,6 +411,67 @@ describe("projects", () => {
     await expect(
       tools.list_decks({ project_id: "proj-other" }, ctx),
     ).rejects.toThrow(/not found in this workspace/);
+  });
+
+  it("list_decks hides archived decks by default, includes them with include_archived", async () => {
+    // An archived deck in the workspace (workspace-visible, so not dropped for
+    // any private-access reason — the only thing hiding it is archived_at).
+    fakeDb.canvas_deck.push({
+      id: "deck-archived",
+      workspace_id: ctx.workspace_id,
+      title: "Shelved deck",
+      project_id: null,
+      visibility: "workspace",
+      updated_at: "2026-06-05",
+      archived_at: "2026-06-06T00:00:00.000Z",
+    });
+
+    const def = (await tools.list_decks({}, ctx)) as {
+      decks: Array<{ id: string; archived_at: string | null }>;
+    };
+    expect(def.decks.map((d) => d.id)).not.toContain("deck-archived");
+
+    const withArchived = (await tools.list_decks(
+      { include_archived: true },
+      ctx,
+    )) as { decks: Array<{ id: string; archived_at: string | null }> };
+    const shelved = withArchived.decks.find((d) => d.id === "deck-archived");
+    expect(shelved).toBeTruthy();
+    expect(shelved?.archived_at).toBe("2026-06-06T00:00:00.000Z");
+    // Active rows still carry the column, as null.
+    const active = withArchived.decks.find((d) => d.id === "deck-1");
+    expect(active?.archived_at ?? null).toBeNull();
+  });
+
+  it("list_projects deck_count excludes archived decks", async () => {
+    // deck-1 and deck-2 are in PROJECT_ID and visible → count 2. Archive one;
+    // the count must drop to 1, matching the /canvases active-only grouping.
+    const target = fakeDb.canvas_deck.find((d) => d.id === "deck-2");
+    if (target) target.archived_at = "2026-06-06T00:00:00.000Z";
+    const result = (await tools.list_projects({}, ctx)) as {
+      projects: Array<{ deck_count: number }>;
+    };
+    expect(result.projects[0].deck_count).toBe(1);
+  });
+
+  it("list_decks rejects a non-boolean include_archived instead of silently coercing it", async () => {
+    // A stringified boolean is a known tool-calling failure mode; coercing it to
+    // false would return the active-only set with no error. Fail loud instead.
+    await expect(
+      tools.list_decks({ include_archived: "true" }, ctx),
+    ).rejects.toThrow(/include_archived must be a boolean/);
+  });
+
+  it("get_deck returns archived_at and still opens an archived deck (access-preserving)", async () => {
+    const target = fakeDb.canvas_deck.find((d) => d.id === "deck-1");
+    if (target) target.archived_at = "2026-06-06T00:00:00.000Z";
+    const result = (await tools.get_deck({ deck_id: "deck-1" }, ctx)) as {
+      deck: { id: string; archived_at: string | null };
+    };
+    // Archiving does not gate reads — the deck still resolves — and the marker
+    // rides through so the editor can render its "Archived" chip.
+    expect(result.deck.id).toBe("deck-1");
+    expect(result.deck.archived_at).toBe("2026-06-06T00:00:00.000Z");
   });
 
   it("create_deck rejects an unknown project_id before creating anything", async () => {

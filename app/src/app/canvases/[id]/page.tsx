@@ -139,7 +139,7 @@ export default async function CanvasDeckPage({
     supabase
       .from("canvas_deck")
       .select(
-        "id, workspace_id, title, status, theme_css, created_at, updated_at, visibility, created_by, agent_fast_lane_enabled",
+        "id, workspace_id, title, status, theme_css, created_at, updated_at, visibility, created_by, agent_fast_lane_enabled, archived_at",
       )
       .eq("id", id)
       .maybeSingle(),
@@ -432,6 +432,7 @@ export default async function CanvasDeckPage({
     tokenRowResult,
     membersResult,
     openRouterConfig,
+    fastLaneCountResult,
   ] = await Promise.all([
       commentAuthorIds.length > 0
         ? supabase
@@ -494,6 +495,25 @@ export default async function CanvasDeckPage({
             defaultRuntime: "bridge" as const,
             validatedAt: null,
           }),
+      // Historical qualifying self-approvals by THIS viewer on THIS deck — the
+      // seed count for the inline fast-lane offer. Derived from the DB (not a
+      // client-side tally) so every approve surface counts — single chip,
+      // multi-select, the inbox — and the count survives browsers and reloads.
+      // The filters mirror approvalCountsTowardFastLaneOffer's proposal shape;
+      // the context half (lane off, can manage, self-approval on) is the
+      // workspace's job at render time. Skipped once the lane is on.
+      user && !(deck as { agent_fast_lane_enabled?: boolean }).agent_fast_lane_enabled
+        ? supabase
+            .from("canvas_deck_edit")
+            .select("id", { count: "exact", head: true })
+            .eq("deck_id", id)
+            .eq("status", "applied")
+            .eq("proposed_by_kind", "claude")
+            .eq("auto_apply_eligible", true)
+            .not("agent_rendered_at", "is", null)
+            .eq("proposed_by", user.id)
+            .eq("resolved_by", user.id)
+        : Promise.resolve({ count: 0 }),
     ]);
 
   const authorProfiles = authorProfilesResult.data ?? [];
@@ -612,6 +632,7 @@ export default async function CanvasDeckPage({
           visibility: (deck.visibility === "private" ? "private" : "workspace"),
           created_by: deck.created_by,
           agent_fast_lane_enabled: deck.agent_fast_lane_enabled ?? false,
+          archived_at: deck.archived_at ?? null,
         }}
         slides={slides}
         comments={comments}
@@ -634,6 +655,7 @@ export default async function CanvasDeckPage({
         initialAssistantRuntime={openRouterConfig.defaultRuntime}
         brandBlurb={brandBlurb}
         members={members}
+        fastLaneQualifyingCount={fastLaneCountResult.count ?? 0}
       />
     </>
   );

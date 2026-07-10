@@ -161,6 +161,7 @@ export async function POST(
       deck_id: deck.id,
       slide_id: slideId,
       status: "error",
+      error: insertErr,
       error_code: insertErr?.code ?? "insert_error",
     });
     return NextResponse.json({ ok: false, error: "write_failed" }, { status: 500 });

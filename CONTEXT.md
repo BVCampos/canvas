@@ -25,6 +25,29 @@ A single HTML artifact — typically a presentation. Composed of an ordered set 
 - ✗ Not "presentation" (we may eventually allow non-slide decks like single-page reports)
 - ✗ Not "canvas" — Canvas is the product name; the artifact is a Deck
 
+### Archived deck
+A deck shelved out of the default list without being deleted. Stored as
+`canvas_deck.archived_at` (nullable timestamp, migration 0074): `null` = active,
+a timestamp = archived (and when). Archiving is **orthogonal** to both `status`
+(editorial: draft/in_review/final) and `visibility` (access: workspace/private),
+and it is **access-preserving** — an archived deck still opens, edits, exports,
+and, if it already has a `public_share_token`, still serves at `/p/{token}`. What
+it does is drop the deck from the deck **browse/pick** surfaces — the default
+`/canvases` list, MCP `list_decks`, `list_projects` deck-counts, and the
+copy-from-deck picker (`listCopySources`) — while the `/settings/sharing`
+public-link overview and the proposal inbox deliberately keep it. Only `/canvases`
+and `list_decks` offer an explicit include-archived view (`/canvases?archived=1`,
+`list_decks(include_archived: true)`). Reversible in one write back to `null`.
+Archiving is **creator/admin-only** (it pulls a deck from everyone's list — scoped
+like Delete): `setDeckArchived` authorizes creator-or-admin **in code** (via
+`is_workspace_admin_or_owner`), because the shared "editors and admins update
+decks" policy also admits deck-editor members — the same guard pattern as
+`setDeckAgentFastLane`. No new RLS/table, and **no agent write tool** (archiving
+is a human organizational act, never a proposal). See ADR-0013.
+
+- ✗ Not delete (`deleteDeck` is destructive + irreversible; archive is neither)
+- ✗ Not a `status` value and not a `visibility` change
+
 ### Slide
 The unit of collaboration. One `<section class="slide ...">` from the source HTML maps to one row in `public.canvas_deck_slide`. Each Slide stores: ordered `position`, `title`, `html_body`, `slide_styles` (slide-scoped CSS that doesn't belong in the deck theme), `owner_id`, `status`.
 
@@ -150,7 +173,7 @@ These let Claude reason about history — *"slide 3 was best at v5, restoring"*,
 Canvas uses a single global URL space — no `/w/{slug}/` prefix. Active workspace is resolved from the `canvas_active_workspace` cookie (or the user's oldest membership as a fallback); the topbar dropdown switches it. See `app/src/lib/auth/workspace.ts`.
 
 - `/login` — Google + magic link
-- `/canvases` — Deck list
+- `/canvases` — Deck list (active decks; `?archived=1` shows the archived shelf — see **Archived deck**)
 - `/canvases/new` — Create / import
 - `/canvases/{id}` — Editor (3-pane)
 - `/canvases/{id}/present` — Full-screen presentation; shows the current slide's Speaker Notes to the presenter
@@ -215,5 +238,6 @@ Canvas owns its own OAuth client (separate from the old shared project, since th
 | [0010](docs/adr/0010-dual-assistant-runtime.md) | **Ask agent** supports two isolated per-turn runtimes: the local bridge or server-side OpenRouter using the user's AES-256-GCM-encrypted personal API key. Both use the same Canvas tools, proposal/review gate, visual renders, Realtime stream, and Stop semantics. |
 | [0011](docs/adr/0011-workspace-openrouter-key.md) | A workspace-level shared OpenRouter key, so members can use the server-side runtime without each configuring a personal key. Extends ADR-0010. |
 | [0012](docs/adr/0012-draw-slides-and-direct-structural-ops.md) | **Draw a slide** (Excalidraw-style) stores the drawing as SVG in `html_body`, re-editable via an embedded `data-canvas-scene` — plain HTML, so it renders in preview/export/thumbnails unchanged. **Draw over slide** injects the same scene as a `canvas-draw-overlay` layer inside an existing slide's `<section>`; being a content edit, it saves through the inline-edit gate (direct or proposal), no migration. Structural ops **reorder** + **create** go DIRECT for deck editors via two `canvas_can_edit_deck`-gated `SECURITY DEFINER` RPCs (migration 0061); agents keep the propose path. Extends ADR-0002/0005. |
+| [0013](docs/adr/0013-deck-archiving.md) | **Deck archiving** — `canvas_deck.archived_at` (nullable timestamp, migration 0074) shelves a deck from the deck browse/pick surfaces (`/canvases`, MCP `list_decks`, `list_projects` counts, copy-from-deck picker) without deleting it. Orthogonal to `status` and `visibility`, access-preserving (archived decks still open/edit/serve public links), reversible. Creator/admin-only, enforced in-code (`is_workspace_admin_or_owner`, like `setDeckAgentFastLane`); no new RLS/table and no agent write tool. Extends ADR-0002. |
 
-(ADR docs are filled in as we land phases. 0001–0003 still live as stubs; 0004 was written when Canvas was split into its own project; 0006–0008 establish the local assistant, threads, and Stop; 0009 makes clients provider-neutral; 0010 adds the optional personal OpenRouter runtime; 0011 shares one OpenRouter key per workspace; 0012 adds drawn slides, draw-over-slide overlays + direct reorder/create.)
+(ADR docs are filled in as we land phases. 0001–0003 still live as stubs; 0004 was written when Canvas was split into its own project; 0006–0008 establish the local assistant, threads, and Stop; 0009 makes clients provider-neutral; 0010 adds the optional personal OpenRouter runtime; 0011 shares one OpenRouter key per workspace; 0012 adds drawn slides, draw-over-slide overlays + direct reorder/create; 0013 adds deck archiving.)

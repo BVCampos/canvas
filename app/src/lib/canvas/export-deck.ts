@@ -29,6 +29,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assembleDeckHtml } from "@/lib/canvas/assemble";
+import { logViewportShimFallback } from "@/lib/canvas/shim-fallback-log";
 import {
   collectAssetIds,
   inlineAssetRefs,
@@ -267,6 +268,19 @@ export async function buildDeckExportHtml(
       _kind: "pre_export",
     });
   }
+
+  // Signal when this export lands on the squeeze fallback that scrambles
+  // fixed-px decks (fires only on that path; see logViewportShimFallback).
+  // Reads raw theme/nav — asset/font inlining doesn't touch the `.slide` size
+  // rules or `--slide-zoom` the gate keys off.
+  logViewportShimFallback({
+    theme_css: deck.theme_css ?? "",
+    nav_js: deck.nav_js ?? "",
+    surface: "api",
+    deck_id: id,
+    user_id: user.id,
+    workspace_id: deck.workspace_id as string,
+  });
 
   // Asset re-inlining, font inlining, and export-mode assembly are shared with
   // the render_slide MCP tool (assembleSelfContainedDeck). The asset lookup runs
