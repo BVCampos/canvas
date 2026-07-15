@@ -1,7 +1,11 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { isAllowlistedFontUrl, parseDeckHtml } from "../src/lib/canvas/parser";
+import {
+  ASSET_UPLOAD_MIMES,
+  isAllowlistedFontUrl,
+  parseDeckHtml,
+} from "../src/lib/canvas/parser";
 
 const fixturesDir = join(__dirname, "fixtures");
 
@@ -238,6 +242,50 @@ describe("parseDeckHtml — CSS background data URLs", () => {
     const d = parseDeckHtml(h);
     expect(d.assets).toHaveLength(0);
     expect(d.theme_css).toContain(svg);
+  });
+});
+
+// Embedded fonts ride the same extraction path as images. Regression for the
+// 2026-07-11 prod import failures: a deck whose @font-face embeds a TTF data
+// URL parsed fine, then the storage upload rejected `font/ttf` and the whole
+// import died. The parser must lift the font AND emit the canonical mime
+// spelling the `decks` bucket allows (migration 0077).
+describe("parseDeckHtml — embedded font data URLs + mime canonicalization", () => {
+  const TTF = `data:font/ttf;base64,${Buffer.from("fake-ttf-bytes").toString("base64")}`;
+  const html = `<!DOCTYPE html><html lang="en"><head><title>Font deck</title>
+    <style>@font-face{font-family:X;src:url('${TTF}') format('truetype');}</style>
+    </head><body><section class="slide"><h1>Cover</h1></section></body></html>`;
+  const deck = parseDeckHtml(html);
+
+  it("hoists a TTF @font-face data URL into assets", () => {
+    expect(deck.assets).toHaveLength(1);
+    expect(deck.assets[0].mime_type).toBe("font/ttf");
+    expect(deck.theme_css).not.toContain("data:font/ttf");
+    expect(deck.theme_css).toContain(deck.assets[0].placeholder_id);
+  });
+
+  it("normalizes alias mimes onto the canonical spelling", () => {
+    const woff = `data:application/font-woff;base64,${Buffer.from("fake-woff").toString("base64")}`;
+    const jpg = `data:image/jpg;base64,${Buffer.from("fake-jpg").toString("base64")}`;
+    const h = `<html><head><title>t</title><style>@font-face{src:url(${woff})}</style></head><body><section class="slide"><img src="${jpg}"><h1>x</h1></section></body></html>`;
+    const d = parseDeckHtml(h);
+    expect(d.assets.map((a) => a.mime_type).sort()).toEqual([
+      "font/woff",
+      "image/jpeg",
+    ]);
+  });
+
+  it("ASSET_UPLOAD_MIMES carries canonical spellings only", () => {
+    for (const alias of [
+      "image/jpg",
+      "image/vnd.microsoft.icon",
+      "application/font-woff",
+      "application/font-woff2",
+    ]) {
+      expect(ASSET_UPLOAD_MIMES).not.toContain(alias);
+    }
+    expect(ASSET_UPLOAD_MIMES).toContain("font/ttf");
+    expect(ASSET_UPLOAD_MIMES).toContain("font/otf");
   });
 });
 

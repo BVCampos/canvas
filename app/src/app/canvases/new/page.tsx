@@ -51,9 +51,9 @@ export default async function NewCanvasPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">New deck</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Import an existing HTML deck or start from blank. Canvas decomposes
-          the file into editable slides, hoists embedded images to Storage, and
-          keeps the shared CSS as the deck theme.
+          Import an existing HTML deck, start from a template, or go blank.
+          Canvas splits the file into editable slides and brings its images
+          and styling along.
         </p>
       </div>
 

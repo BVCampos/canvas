@@ -291,10 +291,18 @@ function mimeToExt(mime: string): string {
       return "svg";
     case "image/avif":
       return "avif";
+    case "image/bmp":
+      return "bmp";
+    case "image/x-icon":
+      return "ico";
     case "font/woff":
       return "woff";
     case "font/woff2":
       return "woff2";
+    case "font/ttf":
+      return "ttf";
+    case "font/otf":
+      return "otf";
     default:
       return "bin";
   }

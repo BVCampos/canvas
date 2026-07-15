@@ -489,6 +489,7 @@ export default async function CanvasDeckPage({
         : Promise.resolve({
             configured: false,
             source: null,
+            provider: "openrouter" as const,
             encryptionReady: false,
             keyHint: null,
             modelId: "openrouter/auto",

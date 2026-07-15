@@ -6,6 +6,12 @@ import { Input } from "@/components/ui/input";
 import { formatDate, relativeDate } from "@/lib/utils";
 import { isMcpTokenExpired } from "@/lib/canvas/mcp-token";
 import { createClient } from "@/lib/supabase/client";
+import {
+  CommandRow,
+  ConnectionCheck,
+  ExternalAgentSetup,
+  inferProviderFromLabel,
+} from "@/components/mcp-connect";
 import { createMcpToken, revokeMcpToken, rotateMcpToken } from "./actions";
 
 type TokenRow = {
@@ -40,6 +46,14 @@ export function McpTokenManager({
   const [justCreated, setJustCreated] = useState<{ token: string; label: string | null } | null>(
     null,
   );
+  // First successful call made with the just-created token — polled below so
+  // the reveal panel can flip from "waiting" to "connected" while the user
+  // still has the setup command on screen.
+  const [firstConnection, setFirstConnection] = useState<{
+    token: string;
+    at: string;
+    client: string | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [bridgePresence, setBridgePresence] = useState(initialBridgePresence);
   const [now, setNow] = useState(() => Date.now());
@@ -78,6 +92,36 @@ export function McpTokenManager({
     };
   }, [currentUserId]);
 
+  // While the reveal panel is open and the token hasn't been used yet, poll
+  // its row (RLS scopes reads to the owner) so the "waiting for the first
+  // connection" line turns green on its own — the confirmation moment the
+  // install step otherwise lacks. Stops as soon as a connection is seen.
+  useEffect(() => {
+    if (!justCreated) return;
+    const supabase = createClient();
+    let cancelled = false;
+    const check = async () => {
+      const { data } = await supabase
+        .from("canvas_mcp_token")
+        .select("last_used_at, last_client_name")
+        .eq("token", justCreated.token)
+        .maybeSingle();
+      if (cancelled || !data?.last_used_at) return;
+      setFirstConnection({
+        token: justCreated.token,
+        at: data.last_used_at as string,
+        client: (data.last_client_name as string | null) ?? null,
+      });
+      window.clearInterval(interval);
+    };
+    const interval = window.setInterval(() => void check(), 4000);
+    void check();
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [justCreated]);
+
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
@@ -87,6 +131,7 @@ export function McpTokenManager({
         setError(result.error);
         return;
       }
+      setFirstConnection(null);
       setJustCreated({ token: result.token, label: result.label });
       setLabel("");
     });
@@ -108,13 +153,30 @@ export function McpTokenManager({
         return;
       }
       // Reveal the replacement once, exactly like a fresh create.
+      setFirstConnection(null);
       setJustCreated({ token: result.token, label: result.label });
     });
   };
 
-  const liveTokens = tokens.filter((t) => !t.revoked_at);
+  // The reveal-panel poll flips `firstConnection` the moment the just-created
+  // token is first used, but the server-rendered `tokens` prop still says
+  // "Not connected yet". Fold that first connection into the token it belongs
+  // to so the token rows AND the ConnectionOverview below reflect it too — a
+  // pure render-time derivation, no reload and no extra state. Keyed on the
+  // token stamped INTO firstConnection (not justCreated) so the flipped state
+  // survives the reveal panel being dismissed.
+  const displayTokens = tokens.map((t) =>
+    firstConnection && t.token === firstConnection.token
+      ? {
+          ...t,
+          last_used_at: firstConnection.at,
+          last_client_name: firstConnection.client,
+        }
+      : t,
+  );
+  const liveTokens = displayTokens.filter((t) => !t.revoked_at);
   const usableTokens = liveTokens.filter((t) => !isMcpTokenExpired(t.expires_at));
-  const revokedTokens = tokens.filter((t) => t.revoked_at);
+  const revokedTokens = displayTokens.filter((t) => t.revoked_at);
   const latestConnectedToken = usableTokens.find((t) => t.last_used_at) ?? null;
   const bridgeOnline = Boolean(
     bridgePresence &&
@@ -123,23 +185,25 @@ export function McpTokenManager({
 
   return (
     <div className="space-y-6">
-      <ConnectionOverview
-        token={latestConnectedToken}
-        hasToken={usableTokens.length > 0}
-        bridgePresence={bridgePresence}
-        bridgeOnline={bridgeOnline}
-      />
-
+      {/* The create form leads: minting a token is the first thing a new user
+          must do, so it sits above the status cards (which read "not
+          configured" until the setup below has happened). */}
       <form
         onSubmit={handleCreate}
         className="rounded-[12px] border border-border bg-card p-6 space-y-4"
       >
-        <div className="eyebrow">Create an access token</div>
+        <div>
+          <div className="eyebrow">Create an access token</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Your agent signs in to Canvas with a personal token. Create one,
+            then copy the setup command it unlocks.
+          </p>
+        </div>
         {/* Stack the label input above the Create button on mobile so neither
             gets squeezed; inline row from sm+ as before. */}
         <div className="flex flex-col gap-2 sm:flex-row">
           <Input
-            placeholder="Where you will use it (e.g. 'Codex laptop')"
+            placeholder="Where you will use it (e.g. 'Claude Code laptop')"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
           />
@@ -154,12 +218,22 @@ export function McpTokenManager({
 
       {justCreated ? (
         <RevealPanel
+          key={justCreated.token}
           token={justCreated.token}
           label={justCreated.label}
           baseUrl={baseUrl}
+          firstConnection={firstConnection}
+          bridgeOnline={bridgeOnline}
           onDismiss={() => setJustCreated(null)}
         />
       ) : null}
+
+      <ConnectionOverview
+        token={latestConnectedToken}
+        hasToken={usableTokens.length > 0}
+        bridgePresence={bridgePresence}
+        bridgeOnline={bridgeOnline}
+      />
 
       <div className="rounded-[12px] border border-border bg-card">
         <div className="border-b border-border px-5 py-3">
@@ -239,6 +313,30 @@ export function McpTokenManager({
                 {/* self-end right-aligns the revoke control on its own line on
                     mobile; shrink-0 keeps it intact inline at sm+. */}
                 <div className="flex shrink-0 items-center gap-1 self-end sm:self-auto">
+                  {/* Closing the reveal panel before copying the command is a
+                      dead end otherwise — the full token is already client-side
+                      (masking is display-only), so re-opening the panel exposes
+                      nothing new. Only offered while the token has never
+                      connected and is still usable; once used, the setup step
+                      is done and the row falls back to Rotate/Revoke. */}
+                  {!t.last_used_at &&
+                  !isMcpTokenExpired(t.expires_at) &&
+                  justCreated?.token !== t.token ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={isPending}
+                      onClick={() => {
+                        setError(null);
+                        setFirstConnection(null);
+                        setJustCreated({ token: t.token, label: t.label });
+                      }}
+                      title="Show the setup command for this token again"
+                    >
+                      Show setup command
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     variant="ghost"
@@ -299,11 +397,11 @@ function ConnectionOverview({
     <section className="grid gap-3 sm:grid-cols-2" aria-label="Connection status">
       <div className="rounded-[12px] border border-border bg-card p-5">
         <div className="flex items-center justify-between gap-3">
-          <div className="eyebrow">External agent</div>
+          <div className="eyebrow">Terminal agent</div>
           <StatusPill
             active={Boolean(token)}
-            activeLabel="Seen"
-            inactiveLabel="Not seen"
+            activeLabel="Connected"
+            inactiveLabel="Not connected"
           />
         </div>
         <p className="mt-2 text-sm font-medium text-foreground">
@@ -311,20 +409,20 @@ function ConnectionOverview({
             ? `${token.last_client_name || "MCP client"} connected`
             : hasToken
               ? "Waiting for first connection"
-              : "Not configured"}
+              : "No token yet — create one above"}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
           {token?.last_used_at
             ? `Last used ${relativeDate(token.last_used_at)}${
                 token.last_client_version ? ` · v${token.last_client_version}` : ""
               }`
-            : "Works with Codex, Claude Code, and any streamable-HTTP MCP client."}
+            : "Works with Claude Code, Codex, and any compatible AI agent."}
         </p>
       </div>
 
       <div className="rounded-[12px] border border-border bg-card p-5">
         <div className="flex items-center justify-between gap-3">
-          <div className="eyebrow">Local chat bridge</div>
+          <div className="eyebrow">Canvas chat</div>
           <StatusPill
             active={bridgeOnline}
             activeLabel="Online"
@@ -341,7 +439,7 @@ function ConnectionOverview({
                   ? ` · bridge v${bridgePresence.bridge_version}`
                   : ""
               }`
-            : "Run canvas-agent with your preferred provider to use the in-deck chat."}
+            : "Powers the in-deck Ask-agent panel — start it from a token above."}
         </p>
       </div>
     </section>
@@ -389,27 +487,21 @@ function RevealPanel({
   token,
   label,
   baseUrl,
+  firstConnection,
+  bridgeOnline,
   onDismiss,
 }: {
   token: string;
   label: string | null;
   baseUrl: string;
+  firstConnection: { at: string; client: string | null } | null;
+  bridgeOnline: boolean;
   onDismiss: () => void;
 }) {
-  const fullUrl = `${baseUrl}/api/mcp/${token}`;
-  const bearerUrl = `${baseUrl}/api/mcp`;
-  const [externalAgent, setExternalAgent] = useState<
-    "codex" | "claude" | "other"
-  >("codex");
+  const inferred = inferProviderFromLabel(label);
   const [bridgeProvider, setBridgeProvider] = useState<"codex" | "claude">(
-    "codex",
+    inferred ?? "codex",
   );
-  const externalCommand =
-    externalAgent === "codex"
-      ? `export CANVAS_MCP_TOKEN=${token}\ncodex mcp add canvas --url ${bearerUrl} --bearer-token-env-var CANVAS_MCP_TOKEN`
-      : externalAgent === "claude"
-        ? `claude mcp add --scope user --transport http canvas ${fullUrl}`
-        : `${bearerUrl}\nAuthorization: Bearer ${token}`;
   const bridgeCommand = `CANVAS_AGENT_PROVIDER=${bridgeProvider} CANVAS_MCP_TOKEN=${token} CANVAS_URL=${baseUrl} npx @21xventures/canvas-agent`;
 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -429,8 +521,9 @@ function RevealPanel({
             Token created{label ? ` · ${label}` : ""}
           </div>
           <p className="mt-1 text-sm text-foreground">
-            Choose how you want to work. This is the only time Canvas shows the
-            full token; after you close this panel, only its masked prefix remains.
+            One setup step left. Keep it secret — anyone with it can act as you.
+            You can reopen this setup panel from the token list until the token
+            first connects.
           </p>
         </div>
         <button
@@ -443,108 +536,86 @@ function RevealPanel({
         </button>
       </div>
 
-      <div className="space-y-3 rounded-[10px] border border-border bg-card/70 p-4">
-        <div>
-          <div className="eyebrow">Use an external agent</div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Add Canvas as an MCP server in the agent you already use.
-          </p>
+      <div className="space-y-3 rounded-[10px] border border-[color:var(--accent)]/30 bg-card/70 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <div className="eyebrow">Work from your terminal</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Drive Canvas from the coding agent you already use — ask for
+              edits in your terminal, review and approve them here.
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-[color:var(--accent)]/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-[color:var(--accent-dim)]">
+            Most people start here
+          </span>
         </div>
-        <div className="flex flex-wrap gap-1" aria-label="Choose MCP client">
-          {(["codex", "claude", "other"] as const).map((agent) => (
-            <button
-              key={agent}
-              type="button"
-              aria-pressed={externalAgent === agent}
-              onClick={() => setExternalAgent(agent)}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                externalAgent === agent
-                  ? "bg-foreground text-background"
-                  : "bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {agent === "codex"
-                ? "Codex"
-                : agent === "claude"
-                  ? "Claude Code"
-                  : "Other MCP client"}
-            </button>
-          ))}
-        </div>
-        <CommandRow
-          command={externalCommand}
-          copied={copiedKey === "external"}
-          onCopy={() => copy("external", externalCommand)}
-          copyLabel={externalAgent === "other" ? "Copy details" : "Copy command"}
-        />
-        {externalAgent === "other" ? (
-          <p className="text-[11px] text-muted-foreground">
-            Use Streamable HTTP. Clients that support bearer authentication can
-            call <code className="font-mono">{baseUrl}/api/mcp</code> with this
-            token in the Authorization header.
-          </p>
-        ) : null}
-      </div>
-
-      <div className="space-y-3 rounded-[10px] border border-border bg-card/70 p-4">
-        <div>
-          <div className="eyebrow">Use the Canvas chat</div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Run the local bridge with Codex or Claude Code. It can use Canvas
-            tools only and never sends your provider credential to Canvas.
-          </p>
-        </div>
-        <div className="flex gap-1" aria-label="Choose local agent provider">
-          {(["codex", "claude"] as const).map((provider) => (
-            <button
-              key={provider}
-              type="button"
-              aria-pressed={bridgeProvider === provider}
-              onClick={() => setBridgeProvider(provider)}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                bridgeProvider === provider
-                  ? "bg-foreground text-background"
-                  : "bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {provider === "codex" ? "Codex" : "Claude Code"}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Make sure <code className="font-mono">{bridgeProvider}</code> is
-          installed and signed in locally, then leave this command running.
-        </p>
-        <CommandRow
-          command={bridgeCommand}
-          copied={copiedKey === "bridge"}
-          onCopy={() => copy("bridge", bridgeCommand)}
-          copyLabel="Copy command"
+        <ExternalAgentSetup
+          baseUrl={baseUrl}
+          token={token}
+          defaultAgent={inferred ?? "codex"}
+          connected={Boolean(firstConnection)}
+          waitingCopy="Waiting for the first connection — this flips green on its own once your agent calls Canvas."
+          connectedCopy={`${firstConnection?.client || "Your agent"} connected — you're set. Open a deck and ask it for an edit.`}
         />
       </div>
-    </div>
-  );
-}
 
-function CommandRow({
-  command,
-  copied,
-  onCopy,
-  copyLabel,
-}: {
-  command: string;
-  copied: boolean;
-  onCopy: () => void;
-  copyLabel: string;
-}) {
-  return (
-    <div className="flex flex-col gap-2 sm:flex-row">
-      <code className="min-w-0 flex-1 overflow-x-auto rounded-[8px] border border-border bg-paper px-3 py-2 font-mono text-xs whitespace-nowrap">
-        {command}
-      </code>
-      <Button type="button" variant="outline" onClick={onCopy}>
-        {copied ? "Copied" : copyLabel}
-      </Button>
+      {/* The bridge is the secondary path (it powers the in-deck chat panel),
+          so it starts collapsed — two open blocks that both name Codex and
+          Claude Code read as an unanswerable either/or. */}
+      <details className="group rounded-[10px] border border-border bg-card/70">
+        <summary className="cursor-pointer list-none space-y-1 p-4 [&::-webkit-details-marker]:hidden">
+          <div className="flex items-center justify-between gap-3">
+            <div className="eyebrow">Chat inside Canvas instead</div>
+            <span
+              className="shrink-0 text-xs text-muted-foreground transition-transform group-open:rotate-180"
+              aria-hidden
+            >
+              ▾
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Prefer not to switch to a terminal? Run a small helper on your
+            machine and the Ask-agent panel inside each deck can draft edits.
+            It uses Canvas tools only and never sends your provider credential
+            to Canvas.
+          </p>
+        </summary>
+        <div className="space-y-3 px-4 pb-4">
+          <div className="flex gap-1" aria-label="Choose local agent provider">
+            {(["codex", "claude"] as const).map((provider) => (
+              <button
+                key={provider}
+                type="button"
+                aria-pressed={bridgeProvider === provider}
+                onClick={() => setBridgeProvider(provider)}
+                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                  bridgeProvider === provider
+                    ? "bg-foreground text-background"
+                    : "bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {provider === "codex" ? "Codex" : "Claude Code"}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Make sure{" "}
+            {bridgeProvider === "codex" ? "Codex" : "Claude Code"} is installed
+            and signed in locally, then leave this command running:
+          </p>
+          <CommandRow
+            command={bridgeCommand}
+            copied={copiedKey === "bridge"}
+            onCopy={() => copy("bridge", bridgeCommand)}
+            copyLabel="Copy command"
+          />
+          <ConnectionCheck
+            connected={bridgeOnline}
+            waitingCopy="Waiting for the bridge — leave the command running; this flips green when it comes online."
+            connectedCopy="Bridge online — open a deck and use the Ask-agent panel."
+          />
+        </div>
+      </details>
     </div>
   );
 }

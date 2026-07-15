@@ -27,6 +27,24 @@ describe("OpenRouter runtime schema", () => {
     expect(checks[0].definition).toContain("bridge");
   });
 
+  it("accepts the BYOK providers and rejects unknown ones (0076)", async () => {
+    const { db } = await freshDb();
+    for (const table of [
+      "canvas_user_ai_provider_config",
+      "canvas_workspace_ai_provider_config",
+    ]) {
+      const { rows } = await db.query<{ definition: string }>(
+        `select pg_get_constraintdef(oid) as definition
+           from pg_constraint
+          where conname = '${table}_provider_check'`,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].definition).toContain("openrouter");
+      expect(rows[0].definition).toContain("anthropic");
+      expect(rows[0].definition).toContain("openai");
+    }
+  });
+
   it("keeps encrypted provider credentials service-role only", async () => {
     const { db } = await freshDb();
     const { rows: policies } = await db.query(

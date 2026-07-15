@@ -565,6 +565,24 @@ const ASSET_MIME_ALLOWLIST = new Set([
   "application/font-woff",
   "application/font-woff2",
 ]);
+// Legacy/alias spellings collapse onto one canonical mime at decode time, so
+// the canvas_deck_asset row, the storage upload contentType, and the asset
+// route's serve-time Content-Type all agree on a single spelling per type.
+const ASSET_MIME_ALIASES: Record<string, string> = {
+  "image/jpg": "image/jpeg",
+  "image/vnd.microsoft.icon": "image/x-icon",
+  "application/font-woff": "font/woff",
+  "application/font-woff2": "font/woff2",
+};
+// Every mime a ParsedAsset can carry (allow-list minus aliases). The `decks`
+// storage bucket's allowed_mime_types must accept ALL of these or the importer
+// fails the whole deck on upload — tests/db/storage-bucket-mimes.test.ts pins
+// the bucket migration to this list.
+export const ASSET_UPLOAD_MIMES: readonly string[] = [
+  ...new Set(
+    [...ASSET_MIME_ALLOWLIST].map((m) => ASSET_MIME_ALIASES[m] ?? m),
+  ),
+];
 const MAX_ASSET_BYTES = 8 * 1024 * 1024; // per-asset decoded size cap (DoS guard)
 const MAX_ASSETS = 400; // per-deck extracted-asset count cap (DoS guard)
 
@@ -639,9 +657,10 @@ function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } | n
   // tsconfig target (ES2017) keeps building without bumping to ES2018.
   const m = dataUrl.match(/^data:([^;,]+)?(?:;([^,]+))?,([\s\S]+)$/);
   if (!m) return null;
-  const mime = (m[1] ?? "application/octet-stream").trim();
+  const rawMime = (m[1] ?? "application/octet-stream").trim().toLowerCase();
   // Allow-list inert types only; everything else stays inline (see above).
-  if (!ASSET_MIME_ALLOWLIST.has(mime.toLowerCase())) return null;
+  if (!ASSET_MIME_ALLOWLIST.has(rawMime)) return null;
+  const mime = ASSET_MIME_ALIASES[rawMime] ?? rawMime;
   const params = (m[2] ?? "").toLowerCase();
   const payload = m[3];
   const isBase64 = params.split(";").some((p) => p === "base64");

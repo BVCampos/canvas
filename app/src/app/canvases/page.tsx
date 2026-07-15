@@ -3,8 +3,11 @@ import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { getActiveWorkspace } from "@/lib/auth/workspace";
 import { relativeDate } from "@/lib/utils";
+import { isMcpTokenExpired } from "@/lib/canvas/mcp-token";
+import { appOrigin } from "@/lib/app-url";
 import { partitionDecksForView } from "@/lib/canvas/deck-list-view";
 import { DeckRowMenu } from "./deck-row-menu";
+import { FirstRunConnect } from "./first-run-connect";
 import { DeckThumbnail } from "./deck-thumbnail";
 import {
   NewProjectButton,
@@ -150,6 +153,25 @@ export default async function CanvasesIndexPage({
   }
   const totalPending = pendingResp.data?.length ?? 0;
 
+  // First-run only: has any of this user's agents connected yet? Mirrors the
+  // Topbar's agent-connected check (same table + filters) so the empty-state
+  // step-2 card can flip to a done-state. Guarded to the empty first-run
+  // screen, so it adds no query to the populated list.
+  let agentConnected = false;
+  if (!isGuest && currentUserId && allItems.length === 0 && projects.length === 0) {
+    const { data: agentTokens } = await supabase
+      .from("canvas_mcp_token")
+      .select("last_used_at, expires_at")
+      .eq("user_id", currentUserId)
+      .eq("workspace_id", workspace.id)
+      .is("revoked_at", null);
+    agentConnected = Boolean(
+      agentTokens?.some(
+        (token) => token.last_used_at && !isMcpTokenExpired(token.expires_at),
+      ),
+    );
+  }
+
   // Group decks under their project; decks with no project (or a project the
   // user can't see — e.g. a guest's shared deck) fall into the ungrouped tail.
   const projectIds = new Set(projects.map((p) => p.id));
@@ -278,7 +300,7 @@ export default async function CanvasesIndexPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Decks</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Multiplayer HTML decks built with any MCP-compatible agent.
+            Multiplayer HTML decks, built with your AI coding agent.
           </p>
         </div>
         {/* Allow the buttons to wrap rather than overflow on the narrowest
@@ -416,23 +438,107 @@ export default async function CanvasesIndexPage({
             </p>
           </div>
         ) : (
-          <div className="rounded-[12px] border border-border bg-card p-12 text-center">
-            <div className="eyebrow">No decks yet</div>
+          // First-run screen, agent-first: a connected agent can draft the
+          // deck (MCP create_deck), but a deck can't connect the agent — so
+          // the friction step leads, and the inline connect module below the
+          // strip handles it on THIS page (token + setup command + live
+          // check), no detour through Settings. The min-h wrapper centers the
+          // card in the space below the header so the empty state doesn't
+          // read half-finished with a blank lower viewport.
+          <div className="flex min-h-[60vh] items-center justify-center">
+          <div className="w-full rounded-[12px] border border-border bg-card p-8 text-center sm:p-12">
+            <div className="eyebrow">Welcome to Canvas</div>
             <h2 className="mt-3 text-lg font-semibold tracking-tight">
-              Import an HTML deck — or start blank
+              Two things to set up: your agent, and a deck
             </h2>
-            <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-              Upload an existing agent-generated deck and Canvas decomposes it
-              into editable slides — or start from a template and let your
-              preferred agent draft it. Your team and their agents can work on
-              different slides in parallel.
+            <p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">
+              You or your agent drafts the slides, every change lands as a
+              proposal your team reviews and approves, and the finished deck
+              exports as a single HTML file.
             </p>
-            <Link
-              href="/canvases/new"
-              className="mt-4 inline-flex text-sm font-medium text-[color:var(--accent)] hover:underline"
-            >
-              Create your first deck →
-            </Link>
+            <ol className="mx-auto mt-8 grid max-w-3xl gap-3 text-left sm:grid-cols-3">
+              <li className="rounded-[10px] border border-border bg-background p-4">
+                <span
+                  className="flex size-6 items-center justify-center rounded-full bg-[color:var(--accent-wash)] text-xs font-semibold text-[color:var(--accent-dim)]"
+                  aria-hidden
+                >
+                  1
+                </span>
+                <h3 className="mt-3 text-sm font-semibold text-foreground">
+                  Connect your agent
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Create an access token and add Canvas to Claude Code or
+                  Codex. Takes about a minute.
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  New to coding agents? They&apos;re AI tools you run yourself —
+                  Canvas has no built-in AI.
+                </p>
+                {agentConnected ? (
+                  <p className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-success-fg">
+                    <span aria-hidden>✓</span>
+                    Connected
+                  </p>
+                ) : isGuest ? (
+                  // Guests don't get the inline connect module below, so the
+                  // card keeps a door to the full Connections page.
+                  <Link
+                    href="/settings/mcp"
+                    className="mt-3 inline-flex text-xs font-medium text-[color:var(--accent)] hover:underline"
+                  >
+                    Open Connections →
+                  </Link>
+                ) : (
+                  <p className="mt-3 text-xs font-medium text-[color:var(--accent-dim)]">
+                    Start below ↓
+                  </p>
+                )}
+              </li>
+              <li className="rounded-[10px] border border-border bg-background p-4">
+                <span
+                  className="flex size-6 items-center justify-center rounded-full bg-[color:var(--accent-wash)] text-xs font-semibold text-[color:var(--accent-dim)]"
+                  aria-hidden
+                >
+                  2
+                </span>
+                <h3 className="mt-3 text-sm font-semibold text-foreground">
+                  Create a deck
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Import an existing HTML deck, start from a template, or go
+                  blank — or ask your connected agent to draft one.
+                </p>
+                <Link
+                  href="/canvases/new"
+                  className="mt-3 inline-flex text-xs font-medium text-[color:var(--accent)] hover:underline"
+                >
+                  New deck →
+                </Link>
+              </li>
+              <li className="rounded-[10px] border border-border bg-background p-4">
+                {/* The payoff, not a setup step — an unnumbered "Then" chip so
+                    the "Two things to set up" heading (steps 1 and 2) stays
+                    truthful. */}
+                <span
+                  className="inline-flex items-center rounded-full bg-[color:var(--accent-wash)] px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[color:var(--accent-dim)]"
+                  aria-hidden
+                >
+                  Then
+                </span>
+                <h3 className="mt-3 text-sm font-semibold text-foreground">
+                  Ask for edits
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Your agent proposes changes; you review, approve, and share.
+                  Teammates and their agents work in parallel.
+                </p>
+              </li>
+            </ol>
+            {!isGuest && !agentConnected ? (
+              <FirstRunConnect baseUrl={appOrigin()} />
+            ) : null}
+          </div>
           </div>
         )
       ) : viewingArchived ? (

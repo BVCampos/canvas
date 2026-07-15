@@ -37,6 +37,34 @@ export default async function LoginPage({
         </div>
       </div>
 
+      {/* The tagline alone can't carry what Canvas is — spell out the loop.
+          Dot colors follow the token semantics: accent = humans, accent-warm
+          = the agent layer, success = applied. */}
+      <ul className="space-y-2 text-sm text-muted-foreground">
+        <li className="flex items-start gap-2.5">
+          <span
+            className="mt-1.5 size-1.5 shrink-0 rounded-full bg-[color:var(--accent-warm)]"
+            aria-hidden
+          />
+          Your AI coding agent — Claude Code or Codex — drafts and edits the
+          slides (you&apos;ll connect one in a minute)
+        </li>
+        <li className="flex items-start gap-2.5">
+          <span
+            className="mt-1.5 size-1.5 shrink-0 rounded-full bg-[color:var(--accent)]"
+            aria-hidden
+          />
+          Import any HTML deck and edit it slide by slide
+        </li>
+        <li className="flex items-start gap-2.5">
+          <span
+            className="mt-1.5 size-1.5 shrink-0 rounded-full bg-success"
+            aria-hidden
+          />
+          You review, approve, share, and export
+        </li>
+      </ul>
+
       <div className="space-y-4">
         <GoogleButton next={safeNext} />
 
@@ -51,7 +79,8 @@ export default async function LoginPage({
       </div>
 
       <p className="text-center text-xs text-muted-foreground">
-        Need an invite? Ask the owner of your Workspace.
+        First time here? Signing in creates your account — you&apos;ll set up
+        a workspace next.
       </p>
     </div>
   );

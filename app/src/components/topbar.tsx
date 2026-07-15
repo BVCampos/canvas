@@ -110,27 +110,33 @@ export async function Topbar({
           slot stays positioned-but-blank on the list / settings pages.
         */}
         <TopbarPresence />
-        {!isGuest && (
-          <Link
-            href="/settings/mcp"
-            // Redundant on mobile — the same destination lives in the UserMenu
-            // dropdown. Hide below sm so the topbar row fits on a 360px phone.
-            className="hidden items-center gap-1.5 text-muted-foreground transition-colors hover:text-foreground sm:flex"
-            title={
-              agentConnected
-                ? `${connectedClient || "Agent"} connected`
-                : "No agent has connected yet"
-            }
-          >
-            {agentConnected ? (
+        {!isGuest &&
+          // The emphasis inverts on connection state: until an agent has
+          // connected, this is the single most important action for a new
+          // user, so it reads as an accent pill; once connected it relaxes
+          // to a quiet link with a green dot. Hidden below sm either way —
+          // the same destination lives in the UserMenu dropdown.
+          (agentConnected ? (
+            <Link
+              href="/settings/mcp"
+              className="hidden items-center gap-1.5 text-muted-foreground transition-colors hover:text-foreground sm:flex"
+              title={`${connectedClient || "Agent"} connected`}
+            >
               <span
                 className="h-1.5 w-1.5 rounded-full bg-success"
                 aria-hidden
               />
-            ) : null}
-            Connections
-          </Link>
-        )}
+              Connections
+            </Link>
+          ) : (
+            <Link
+              href="/settings/mcp"
+              className="hidden items-center gap-1.5 rounded-full bg-[color:var(--accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 sm:inline-flex"
+              title="No agent has connected yet — set one up"
+            >
+              Connect your agent
+            </Link>
+          ))}
         <UserMenu
           name={name}
           email={user.email ?? ""}

@@ -107,6 +107,14 @@ export const EXPORT_CHROME_CSS = `
 //      `size: 1280px 720px landscape` — combining explicit lengths with the
 //      `landscape` keyword is invalid CSS and Chrome silently falls back to
 //      Letter PORTRAIT, i.e. it reintroduces the very bug this fixes.
+//      KNOWN DIVERGENCE from the server PDF export: this manual path lays the
+//      deck out at 1280px paper width while the raster route (slide-raster)
+//      captures at the deck's NATIVE size (1920 for the kit) — a deck with
+//      media-query breakpoints between the two widths prints differently here
+//      than the Export→PDF button renders. Deliberate: this stylesheet must be
+//      deck-independent (it ships inside the exported file), 1280×720 is the
+//      PowerPoint-widescreen sheet, and paper width drives media queries — so
+//      the sheet stays fixed and the server route stays the fidelity path.
 //   2. Unclip the deck: `html,body` height:auto/overflow:visible defeats the
 //      theme's full-viewport clip that was hiding every slide past the first.
 //   3. Collapse the carousel: `.deck/.slides/#slides` → display:block +
@@ -280,11 +288,26 @@ export const EXPORT_PRINT_JS = `
       var wrap = document.createElement('div');
       // Reproduce the section's inner layout so re-parenting the children
       // is visually a no-op; the padding moves here so it scales with the
-      // content instead of pushing it past the clip box.
-      wrap.style.display = cs.display === 'flex' ? 'flex' : 'block';
+      // content instead of pushing it past the clip box. Copy display as
+      // computed — assuming flex-or-block collapsed grid slides to a block
+      // stack — normalizing inline-level variants to their block-level pair
+      // (the wrapper fills the page box). Grid template/auto tracks come
+      // along as their computed (used px) values, freezing the layout the
+      // children already have.
+      var disp = cs.display.indexOf('inline-') === 0 ? cs.display.slice(7) : cs.display;
+      wrap.style.display = disp === 'inline' ? 'block' : (disp || 'block');
       wrap.style.flexDirection = cs.flexDirection;
+      wrap.style.flexWrap = cs.flexWrap;
       wrap.style.justifyContent = cs.justifyContent;
       wrap.style.alignItems = cs.alignItems;
+      wrap.style.alignContent = cs.alignContent;
+      wrap.style.justifyItems = cs.justifyItems;
+      wrap.style.gridTemplateColumns = cs.gridTemplateColumns;
+      wrap.style.gridTemplateRows = cs.gridTemplateRows;
+      wrap.style.gridTemplateAreas = cs.gridTemplateAreas;
+      wrap.style.gridAutoFlow = cs.gridAutoFlow;
+      wrap.style.gridAutoRows = cs.gridAutoRows;
+      wrap.style.gridAutoColumns = cs.gridAutoColumns;
       wrap.style.gap = cs.gap;
       wrap.style.padding = cs.padding;
       wrap.style.boxSizing = 'border-box';

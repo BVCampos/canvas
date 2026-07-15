@@ -167,8 +167,8 @@ export function NewDeckSourceTabs({
         />
         {fileError ? <p className="text-xs text-destructive">{fileError}</p> : null}
         <p className="text-xs text-muted-foreground">
-          We&apos;ll split it into slides, extract images to Storage, and keep
-          the shared CSS as the deck theme. Leave empty to start blank.
+          We&apos;ll split it into slides and bring its images and styling
+          along. Leave empty to start blank.
         </p>
       </div>
 

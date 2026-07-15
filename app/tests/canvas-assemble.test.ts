@@ -380,6 +380,29 @@ describe("assembleDeckHtml — data-canvas-position injection", () => {
     expect(html).toContain('data-canvas-position="1"');
     expect(html).toContain('data-canvas-position="2"');
   });
+
+  it("strips a stale stamp from a round-tripped section (duplicate attribute would resolve to the OLD position)", () => {
+    // A slide exported and re-imported keeps its old data-canvas-position on
+    // the root <section>. HTML resolves duplicate attributes to the FIRST one,
+    // so if assembly merely appended a fresh stamp, navigation and the PDF/PPTX
+    // capture would key off the stale value.
+    const html = assembleDeckHtml({
+      title: "t",
+      theme_css: "",
+      nav_js: "",
+      slides: [
+        {
+          position: 0,
+          title: "s",
+          html_body: '<section class="slide" data-canvas-position="7">Hi</section>',
+          slide_styles: null,
+        },
+      ],
+      mode: "preview",
+    });
+    expect(html).toContain('data-canvas-position="0"');
+    expect(html).not.toContain('data-canvas-position="7"');
+  });
 });
 
 // Coverage for the viewport shim that rebinds fixed-pixel / wrapper-dependent

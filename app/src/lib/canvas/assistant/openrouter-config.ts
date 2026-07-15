@@ -7,11 +7,20 @@ import {
   decryptCredential,
   encryptCredential,
 } from "@/lib/security/credential-crypto";
+import {
+  isHostedProvider,
+  type HostedProvider,
+} from "@/lib/canvas/assistant/hosted-providers";
 
+// Naming debt (ADR-0014): the stored runtime id 'openrouter' means "hosted API
+// runtime" generically — the credential's `provider` column says which vendor.
+// The OpenRouter* names in this module predate BYOK and are kept to avoid an
+// app-wide rename.
 export type AssistantRuntime = "bridge" | "openrouter";
 
 type ConfigRow = {
   user_id: string;
+  provider: string | null;
   encrypted_api_key: string;
   key_hint: string;
   model_id: string;
@@ -19,11 +28,16 @@ type ConfigRow = {
   validated_at: string;
 };
 
+function normalizeProvider(value: unknown): HostedProvider {
+  return isHostedProvider(value) ? value : "openrouter";
+}
+
 export type OpenRouterConfigSummary = {
   configured: boolean;
   // Which config satisfied the lookup: the user's own key, the workspace-shared
   // fallback, or none. `null` when not configured.
   source: "user" | "workspace" | null;
+  provider: HostedProvider;
   encryptionReady: boolean;
   keyHint: string | null;
   modelId: string;
@@ -33,6 +47,7 @@ export type OpenRouterConfigSummary = {
 
 export type WorkspaceOpenRouterConfigSummary = {
   configured: boolean;
+  provider: HostedProvider;
   encryptionReady: boolean;
   keyHint: string | null;
   modelId: string;
@@ -55,7 +70,7 @@ export async function getOpenRouterConfigSummary(
 
   const { data, error } = await db
     .from("canvas_user_ai_provider_config")
-    .select("key_hint, model_id, default_runtime, validated_at")
+    .select("provider, key_hint, model_id, default_runtime, validated_at")
     .eq("user_id", userId)
     .maybeSingle();
   if (error) throw new Error(`OpenRouter config lookup failed: ${error.message}`);
@@ -64,6 +79,7 @@ export async function getOpenRouterConfigSummary(
     return {
       configured: true,
       source: "user",
+      provider: normalizeProvider(data.provider),
       encryptionReady,
       keyHint: (data.key_hint as string | undefined) ?? null,
       modelId: (data.model_id as string | undefined) ?? DEFAULT_MODEL,
@@ -81,6 +97,7 @@ export async function getOpenRouterConfigSummary(
       return {
         configured: true,
         source: "workspace",
+        provider: ws.provider,
         encryptionReady,
         keyHint: ws.keyHint,
         modelId: ws.modelId,
@@ -93,6 +110,7 @@ export async function getOpenRouterConfigSummary(
   return {
     configured: false,
     source: null,
+    provider: "openrouter",
     encryptionReady,
     keyHint: null,
     modelId: DEFAULT_MODEL,
@@ -105,12 +123,17 @@ export async function getOpenRouterCredential(
   userId: string,
   workspaceId?: string | null,
   client?: SupabaseClient,
-): Promise<{ apiKey: string; modelId: string; source: "user" | "workspace" } | null> {
+): Promise<{
+  apiKey: string;
+  modelId: string;
+  provider: HostedProvider;
+  source: "user" | "workspace";
+} | null> {
   const db = admin(client);
   const { data, error } = await db
     .from("canvas_user_ai_provider_config")
     .select(
-      "user_id, encrypted_api_key, key_hint, model_id, default_runtime, validated_at",
+      "user_id, provider, encrypted_api_key, key_hint, model_id, default_runtime, validated_at",
     )
     .eq("user_id", userId)
     .maybeSingle();
@@ -120,6 +143,7 @@ export async function getOpenRouterCredential(
     return {
       apiKey: decryptCredential(row.encrypted_api_key),
       modelId: row.model_id,
+      provider: normalizeProvider(row.provider),
       source: "user",
     };
   }
@@ -135,6 +159,7 @@ export async function getOpenRouterCredential(
 export async function saveOpenRouterCredential(
   input: {
     userId: string;
+    provider: HostedProvider;
     apiKey: string;
     keyHint: string;
     modelId: string;
@@ -148,7 +173,7 @@ export async function saveOpenRouterCredential(
     .upsert(
       {
         user_id: input.userId,
-        provider: "openrouter",
+        provider: input.provider,
         encrypted_api_key: encryptCredential(input.apiKey),
         key_hint: input.keyHint,
         model_id: input.modelId,
@@ -181,7 +206,7 @@ export async function getWorkspaceOpenRouterConfigSummary(
 ): Promise<WorkspaceOpenRouterConfigSummary> {
   const { data, error } = await admin(client)
     .from("canvas_workspace_ai_provider_config")
-    .select("key_hint, model_id, validated_at")
+    .select("provider, key_hint, model_id, validated_at")
     .eq("workspace_id", workspaceId)
     .maybeSingle();
   if (error)
@@ -189,6 +214,7 @@ export async function getWorkspaceOpenRouterConfigSummary(
 
   return {
     configured: Boolean(data),
+    provider: normalizeProvider(data?.provider),
     encryptionReady: credentialEncryptionAvailable(),
     keyHint: (data?.key_hint as string | undefined) ?? null,
     modelId: (data?.model_id as string | undefined) ?? DEFAULT_MODEL,
@@ -199,10 +225,10 @@ export async function getWorkspaceOpenRouterConfigSummary(
 export async function getWorkspaceOpenRouterCredential(
   workspaceId: string,
   client?: SupabaseClient,
-): Promise<{ apiKey: string; modelId: string } | null> {
+): Promise<{ apiKey: string; modelId: string; provider: HostedProvider } | null> {
   const { data, error } = await admin(client)
     .from("canvas_workspace_ai_provider_config")
-    .select("encrypted_api_key, model_id")
+    .select("provider, encrypted_api_key, model_id")
     .eq("workspace_id", workspaceId)
     .maybeSingle();
   if (error)
@@ -211,6 +237,7 @@ export async function getWorkspaceOpenRouterCredential(
   return {
     apiKey: decryptCredential(data.encrypted_api_key as string),
     modelId: (data.model_id as string | undefined) ?? DEFAULT_MODEL,
+    provider: normalizeProvider(data.provider),
   };
 }
 
@@ -218,6 +245,7 @@ export async function saveWorkspaceOpenRouterCredential(
   input: {
     workspaceId: string;
     setBy: string;
+    provider: HostedProvider;
     apiKey: string;
     keyHint: string;
     modelId: string;
@@ -229,7 +257,7 @@ export async function saveWorkspaceOpenRouterCredential(
     .upsert(
       {
         workspace_id: input.workspaceId,
-        provider: "openrouter",
+        provider: input.provider,
         encrypted_api_key: encryptCredential(input.apiKey),
         key_hint: input.keyHint,
         model_id: input.modelId,

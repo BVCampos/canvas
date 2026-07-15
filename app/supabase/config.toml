@@ -103,8 +103,10 @@ port = 54324
 # Uncomment to expose additional ports for testing user applications that send emails.
 # smtp_port = 54325
 # pop3_port = 54326
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# Branded sender so local auth emails read as Canvas, not "Admin <admin@email.com>"
+# (prod sender is configured in the hosted dashboard — see README, "Auth email branding").
+admin_email = "canvas@21xventures.com"
+sender_name = "Canvas"
 
 [storage]
 enabled = true
@@ -230,6 +232,19 @@ otp_expiry = 3600
 # [auth.email.template.invite]
 # subject = "You have been invited"
 # content_path = "./supabase/templates/invite.html"
+
+# Canvas-branded auth emails (local/Mailpit only — the hosted project's
+# templates are set in the Supabase dashboard; see README, "Auth email
+# branding"). signInWithOtp sends `magic_link` for new AND returning users
+# (verified against local GoTrue); `confirmation` only fires on a real
+# signUp() flow, branded anyway so a future password path isn't bare.
+[auth.email.template.magic_link]
+subject = "Sign in to Canvas"
+content_path = "./supabase/templates/magic-link.html"
+
+[auth.email.template.confirmation]
+subject = "Welcome to Canvas — confirm your email"
+content_path = "./supabase/templates/confirm-signup.html"
 
 # Uncomment to customize notification email template
 # [auth.email.notification.password_changed]

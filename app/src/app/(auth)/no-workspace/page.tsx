@@ -12,9 +12,10 @@ import { CreateWorkspaceForm } from "./create-workspace-form";
 //
 //  1. Sign out + try a different email (most common: signed in with the
 //     wrong Google account for a workspace they already belong to).
-//  2. Auto-join footnote for @21xventures.com — migration 0013 auto-joins
-//     those emails to the 21x Ventures seed on first sign-in, so seeing
-//     this screen with that domain typically means a stale session.
+//
+// (Migration 0013 still auto-joins @21xventures.com emails to the 21x
+// Ventures seed on first sign-in, but we no longer advertise that here —
+// the footnote read as internal jargon to every external user.)
 
 export default async function NoWorkspacePage() {
   const supabase = await createClient();
@@ -80,10 +81,6 @@ export default async function NoWorkspacePage() {
             Sign out ({email})
           </Button>
         </form>
-        <p className="text-center text-[11px] text-muted-foreground">
-          If you signed in with an @21xventures.com email, you&rsquo;ve already
-          been added to 21x Ventures — just refresh.
-        </p>
       </div>
     </div>
   );

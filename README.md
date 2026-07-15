@@ -1,27 +1,31 @@
 # 21x Canvas
 
-Agent-agnostic multiplayer editor for HTML decks. Each slide can be owned by a user; Codex, Claude Code, or another MCP-compatible agent proposes edits as diffs the team reviews. Threaded comments and slide locks keep parallel work coherent. Canvas is standalone with its own Supabase project and auth; see [ADR-0004](docs/adr/0004-canvas-standalone.md) for the split and [ADR-0009](docs/adr/0009-agent-agnostic-clients.md) for the client model.
+Multiplayer editor for HTML decks, built for agents. The slide is the unit of collaboration: Claude Code, Codex, or any MCP-compatible agent proposes edits as diffs, and the team reviews, comments, and approves them in the browser. No server-side AI inference; everyone brings their own agent.
 
-![The Canvas editor: slide list on the left, live preview in the center, Ask-agent panel on the right](docs/canvas-editor.png)
+![Canvas: an agent-proposed slide edit under review — before/after diff, approve, and the Ask-agent panel](docs/canvas-demo.gif)
 
-- **Why this exists, in one screen:** [DESIGN.md](DESIGN.md)
-- **Canonical vocabulary (Deck, Slide, Edit, Snapshot, MCP Token, …):** [CONTEXT.md](CONTEXT.md)
-- **Schema:** [app/supabase/migrations/](app/supabase/migrations/) (sequential; 0000 is the workspace tenancy foundation, 0001+ are Canvas-specific)
+## How it works
 
-## What's in here today
+1. **Import a deck** — paste or upload any HTML deck. The parser decomposes it into slides + theme and lifts inline base64 images out to Storage.
+2. **Connect your agent** — mint a personal MCP token in Connections and point any streamable-HTTP MCP client at `/api/mcp`.
+3. **Agents propose, humans approve** — every agent edit lands as a pending proposal with an inline diff. Nothing changes until someone approves it.
+4. **Ship it** — export to self-contained HTML, PDF, or PowerPoint.
 
-- **Auth** — Google + magic link (standalone Supabase project, see [ADR-0004](docs/adr/0004-canvas-standalone.md))
-- **Deck list, create / import** — paste or upload an HTML deck; the parser decomposes it into slides + theme + nav and lifts inline base64 images out to Storage
-- **3-pane editor** — slide list / live iframe preview / right rail (comments + proposals + danger)
-- **Slide locks** — 15-min soft lock; warns when people or their agents converge on the same slide
-- **Proposals** — `canvas_deck_edit` rows with status `pending → applied | rejected`. Inline diff, slide-over sheet, and a per-deck/inbox view
-- **Threaded comments** — top-level pinned to a slide (anchor at fractional x,y), replies thread under. Mentions stored as a uuid array
-- **Versioning** — every applied edit produces a new immutable `canvas_slide_version`; the slide table's `html_body` / `slide_styles` / `title` are denormalized caches kept in sync by the apply-edit RPC. Restores are forward-only
-- **Snapshots** — named deck-wide cuts (manual + auto on export / share / consolidate / pre-restore). Stored as theme/nav + a `(position → slide_version_id)` map; cheap to create
-- **Connections** — per-user MCP tokens plus an optional personal OpenRouter key. Bearer `/api/mcp` works with streamable-HTTP MCP clients; in-app chat can use the local Codex/Claude bridge or OpenRouter per turn
-- **Export** — HTML, PDF, and PowerPoint with auto-snapshots and visible render progress
+**Deeper docs:** [DESIGN.md](DESIGN.md) (why this exists, in one screen) · [CONTEXT.md](CONTEXT.md) (canonical vocabulary: Deck, Slide, Edit, Snapshot, MCP Token, …) · [docs/adr/](docs/adr/) (architectural decisions; [ADR-0004](docs/adr/0004-canvas-standalone.md) covers the standalone split, [ADR-0009](docs/adr/0009-agent-agnostic-clients.md) the agent-agnostic client model)
 
-## Local dev
+## Features
+
+- **Auth** — Google + magic link, on a standalone Supabase project
+- **3-pane editor** — slide list · live preview · activity rail (review, comments, Ask agent)
+- **Proposals** — pending → applied / rejected, with inline diffs and a per-deck review queue. An optional deck-scoped trusted fast lane lets render-verified patches apply directly
+- **Slide locks** — 15-minute soft locks warn when people or their agents converge on the same slide
+- **Threaded comments** — pinned to a spot on the slide, with mentions and an in-app notification feed
+- **Versioning** — every applied edit produces an immutable slide version; restores are forward-only
+- **Snapshots** — named deck-wide cuts, cheap to create, auto-taken on export / share / restore
+- **Connections** — per-user MCP tokens, plus in-app chat that runs through a local Claude Code / Codex bridge or a personal API key (OpenRouter, Anthropic, OpenAI)
+- **Export** — self-contained HTML, PDF, and PowerPoint, with auto-snapshots and visible progress
+
+## Quickstart
 
 ```bash
 cd app
@@ -30,100 +34,90 @@ npm install
 npm run dev                           # http://localhost:3001
 ```
 
-### Required env vars (`app/.env.local`)
+**Bring your own Supabase project:** create one, run every migration in [app/supabase/migrations/](app/supabase/migrations/) in order (`supabase db push` from `app/supabase/`, or paste each file into the SQL editor), then copy the URL + keys from the project's API settings.
+
+### Environment (`app/.env.local`)
 
 | Var | Notes |
 |---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | `https://<your-project-ref>.supabase.co` (browser-safe, not a secret) |
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://<your-project-ref>.supabase.co` (browser-safe) |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Browser-safe `sb_publishable_...` |
-| `SUPABASE_SECRET_KEY` | Server-only `sb_secret_...`. Used by the HTML deck parser (uploads assets via service role), MCP token revocation, and the workspace-create server action (RLS blocks direct INSERT on `public.workspaces`). Never expose to the browser, never commit |
-| `CANVAS_CREDENTIAL_ENCRYPTION_KEY` | Server-only base64-encoded 32-byte key (`openssl rand -base64 32`) used to AES-256-GCM encrypt personal OpenRouter API keys. Keep stable across deploys; never expose or commit |
-| `NEXT_PUBLIC_APP_URL` | `http://localhost:3001` locally; `https://canvas.21xventures.com` in prod |
+| `SUPABASE_SECRET_KEY` | Server-only `sb_secret_...` — deck parser uploads, MCP token revocation, workspace creation. Never expose, never commit |
+| `CANVAS_CREDENTIAL_ENCRYPTION_KEY` | Server-only base64 32-byte key (`openssl rand -base64 32`) that AES-256-GCM-encrypts saved personal API keys. Keep stable across deploys |
+| `NEXT_PUBLIC_APP_URL` | `http://localhost:3001` locally; your public URL in prod |
 
-**Bring your own Supabase project:** create a project, run every migration in `app/supabase/migrations/` in order (`supabase db push` from `app/supabase/`, or paste each file into the SQL editor), then copy the URL + keys from your project's API settings. `app/.env.example` is the source of truth for which vars are needed.
+`app/.env.example` is the source of truth for which vars are needed.
 
 ## Scripts
 
 ```bash
 npm run dev             # next dev on :3001
 npm run build           # next build
-npm run start           # next start on :3001
-npm run lint            # eslint (next config) — must be clean before merging
-npm run test            # vitest run (parser + MCP server unit tests)
-npm run test:watch      # vitest watch
-npm run e2e             # full path against live Supabase + dev server (see below)
+npm run lint            # eslint — must be clean before merging
+npm run test            # vitest (parser, MCP server, RPC/RLS suite on in-process Postgres)
+npm run e2e             # full path against live Supabase + a running dev server
 npm run sweep-orphans   # delete Storage objects whose deck row no longer exists
 ```
 
-### `npm run e2e`
+`npm run e2e` needs `npm run dev` in another terminal plus `E2E_USER_ID` / `E2E_WORKSPACE_ID` pointing at a real user + workspace. It imports the seed deck from `app/tests/fixtures/seed-deck.html` (gitignored — drop in any full HTML deck), mints an MCP token, walks the JSON-RPC surface, exercises preview / asset / export, then cleans up after itself.
 
-End-to-end exercise of the full Canvas v1 path against a live Supabase project. Requires `npm run dev` running in another terminal, plus `E2E_USER_ID` and `E2E_WORKSPACE_ID` set to a user + workspace that exist in your project. Imports the seed deck at `app/tests/fixtures/seed-deck.html` (gitignored — drop in any full HTML deck), mints an MCP token for the test user, walks the JSON-RPC surface, fetches preview / asset / export endpoints, then cleans up everything it created. Source: [app/scripts/e2e-canvas.mts](app/scripts/e2e-canvas.mts).
-
-### `npm run sweep-orphans`
-
-One-shot maintenance — lists every object under the `decks` bucket and deletes any whose `deck_id` path segment has no matching `canvas_deck` row. Safe to run repeatedly. Source: [app/scripts/sweep-orphans.mts](app/scripts/sweep-orphans.mts).
-
-## Directory layout
+## Repository layout
 
 ```
-21x-canvas/
 ├── README.md                       you are here
 ├── CONTEXT.md                      domain glossary — names of things
 ├── DESIGN.md                       why it exists, v1 success criteria
-├── docs/adr/                       architectural decisions (planned)
+├── docs/adr/                       architectural decisions
+├── bridge/                         canvas-agent — local bridge for in-app chat (Claude Code / Codex)
 └── app/                            the Next.js app
     ├── AGENTS.md                   gotchas for AI coding assistants (Next 16, proxy.ts)
-    ├── CLAUDE.md                   includes AGENTS.md
     ├── src/
-    │   ├── proxy.ts                middleware (Next 16 renamed `middleware.ts` → `proxy.ts`)
-    │   ├── app/
-    │   │   ├── (auth)/             login flow
-    │   │   ├── api/                preview, asset, export, mcp routes
-    │   │   ├── canvases/           list, new, [id] editor, inbox, history, proposals
-    │   │   └── settings/mcp/       per-user MCP token issuance
-    │   ├── components/             shared UI + proposal-diff / proposal-iframe
+    │   ├── proxy.ts                middleware (Next 16 renamed middleware.ts → proxy.ts)
+    │   ├── app/                    (auth), api (preview / asset / export / mcp), canvases, settings
+    │   ├── components/             shared UI + proposal diff / preview iframes
     │   └── lib/
     │       ├── auth/               server-action helpers + user resolution
-    │       ├── canvas/             parser, assembler, mcp server, edit RPCs
+    │       ├── canvas/             parser, assembler, MCP server, edit RPCs
     │       └── supabase/           ssr / browser / admin clients
-    ├── supabase/migrations/        0001 schema → 0005 proposals
-    ├── tests/                      vitest specs + fixtures
-    └── scripts/                    e2e + sweep-orphans
+    ├── supabase/migrations/        sequential — 0000 is the tenancy foundation, 0001+ are Canvas
+    ├── tests/                      vitest specs + fixtures (tests/db runs migrations on in-process Postgres)
+    └── scripts/                    e2e + maintenance
 ```
 
-## Tests + fixtures
-
-Vitest covers the deck parser and the MCP server. `tests/fixtures/mini-deck.html` is the committed minimal fixture; `tests/fixtures/seed-deck.html` (a larger real-world deck) is **gitignored** — drop in any full HTML deck if you want to run the e2e or reproduce parser bugs against a complex layout. Any `*.real.html` you drop into `tests/fixtures/` is similarly gitignored.
+Vitest fixtures: `tests/fixtures/mini-deck.html` is the committed minimal deck; `seed-deck.html` and any `*.real.html` are gitignored so you can reproduce parser bugs against complex private decks.
 
 ## Next 16 gotchas
 
-This app runs on **Next 16.2 + React 19.2**, which has breaking changes vs. anything older. The most likely-to-trip-you-up ones:
+The app runs **Next 16.2 + React 19.2**, which breaks assumptions from older versions:
 
-- Middleware lives in [app/src/proxy.ts](app/src/proxy.ts), not `middleware.ts`. The exported function is `proxy`, not `middleware`.
-- Server Components are the default; client components must be explicitly marked.
-- React 19's `react-hooks` lint rules are stricter — setState in effects and refs-during-render are errors, not warnings. Use the "adjust state on prop change" pattern (track previous prop, compare during render) rather than effects when resetting derived state.
+- Middleware lives in [app/src/proxy.ts](app/src/proxy.ts) and exports `proxy`, not `middleware`.
+- Server Components are the default; client components must be marked explicitly.
+- React 19's `react-hooks` lint rules treat setState-in-effect and refs-during-render as errors. Reset derived state with the "adjust state on prop change" pattern, not effects.
 
-When in doubt about an API, read the relevant guide in `app/node_modules/next/dist/docs/` before writing code. See [app/AGENTS.md](app/AGENTS.md).
+When in doubt, read the guides in `app/node_modules/next/dist/docs/` — see [app/AGENTS.md](app/AGENTS.md).
 
-## Supabase
+## Supabase notes
 
-- **Project:** bring your own Supabase project (the reference deployment is named `canvas-prod`)
-- **Region:** `us-east-1`, Postgres 17
-- **Schema:** Canvas tables live in `public` with the `canvas_*` prefix (not a separate Postgres schema — avoids the "exposed schemas" config step in Supabase Studio). Tenancy tables (`workspaces`, `users`, `workspace_memberships`, `workspace_invites`) sit in `public` without a prefix; they're a verbatim port of the workforce-management foundation — see migration 0000 and [ADR-0004](docs/adr/0004-canvas-standalone.md).
-- **Storage bucket:** `decks` (created by migration 0003; assets under `assets/{deck_id}/...`)
-- **Migrations:** apply in order via `supabase db push` from the `app/supabase/` directory, or pasted into the dashboard SQL editor. They're idempotent enough that re-applying is generally safe, but read the file before you do
-- **RLS:** every Canvas table uses `public.is_workspace_member` / `public.is_workspace_admin_or_owner`. `public.workspaces` has **no INSERT policy for `authenticated`** — workspaces are created only via the service-role admin client (`createWorkspaceAction` in `src/lib/auth/actions.ts`)
+- Canvas tables live in `public` with the `canvas_*` prefix; tenancy tables (`workspaces`, `users`, `workspace_memberships`, `workspace_invites`) sit unprefixed — see migration 0000 and [ADR-0004](docs/adr/0004-canvas-standalone.md).
+- Storage bucket `decks` holds deck assets under `assets/{deck_id}/...`.
+- RLS everywhere via `public.is_workspace_member` / `public.is_workspace_admin_or_owner`. `public.workspaces` has no INSERT policy for `authenticated` — workspaces are created only through the service-role admin client.
+- The MCP route resolves token → user/workspace and enforces deck access explicitly. Content writes are propose-first; the trusted fast lane is deck-scoped, patch-only, and requires render verification.
+- Auth email branding: local templates live in `app/supabase/templates/` (wired by `app/supabase/config.toml`); mirror them in the hosted dashboard under Auth → Emails → Templates, since `config.toml` does not reach hosted projects.
 
-The MCP route resolves token → user/workspace and then enforces deck access explicitly. Content writes are propose-first; the optional trusted fast lane is deck-scoped, patch-only, and requires render verification.
+## Deployment
 
-## Production
+Canvas is a standard Next.js app — any Node host works. Two things to wire up:
 
-- **Domain:** `canvas.21xventures.com` (DNS / hosting TBD — Vercel likely)
-- **Auth callback:** Canvas uses its own OAuth client. Wire `https://<your-project-ref>.supabase.co/auth/v1/callback` into that client's redirect URIs, and put your production app URL into Supabase Auth → Redirect URLs.
+- Set `NEXT_PUBLIC_APP_URL` to your public URL; absolute links (auth emails, MCP install deeplinks) are built from it, not from request headers.
+- Give Canvas its own OAuth client: add `https://<your-project-ref>.supabase.co/auth/v1/callback` to the client's redirect URIs, and add your app URL to Supabase Auth → Redirect URLs.
 
 ## Before you commit
 
 1. `npm run lint` — clean
 2. `npm test` — green
 3. `npx tsc --noEmit` — clean
-4. If you touched migrations, sanity-check the SQL against the dashboard before pushing (RLS is easy to break)
+4. Touched migrations? Sanity-check the SQL against a real project before pushing — RLS is easy to break
+
+## License
+
+[MIT](LICENSE)

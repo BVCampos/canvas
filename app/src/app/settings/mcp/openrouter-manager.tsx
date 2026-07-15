@@ -7,14 +7,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { relativeDate } from "@/lib/utils";
 import {
+  HOSTED_PROVIDERS,
+  type HostedProvider,
+} from "@/lib/canvas/assistant/hosted-providers";
+import {
   deleteOpenRouterSettings,
   saveOpenRouterSettings,
 } from "./actions";
 
 type Runtime = "bridge" | "openrouter";
 
+const PROVIDER_ORDER: HostedProvider[] = ["openrouter", "anthropic", "openai"];
+
 export type OpenRouterSettingsView = {
   configured: boolean;
+  provider: HostedProvider;
   encryptionReady: boolean;
   keyHint: string | null;
   modelId: string;
@@ -22,49 +29,30 @@ export type OpenRouterSettingsView = {
   validatedAt: string | null;
 };
 
-// Quick-pick model presets (speed discovery — assistant #6). The floor on a
-// reasoning model's turn is its thinking latency (~10s even for "hi"), so a
-// non-reasoning preset changes the felt speed class for small copy tweaks; the
-// heavier reasoning preset stays for redesigns. The "deep work" value is a
-// comma list — the runner sends the first id as primary and the rest as
-// OpenRouter's `models` fallback array, so a routing flap on the pinned dated
-// id fails over to the alias instead of killing the turn (assistant #2). The
-// field stays free-text; a preset just fills it.
-type ModelPreset = { label: string; model: string; hint: string };
-const MODEL_PRESETS: ModelPreset[] = [
-  {
-    label: "Balanced",
-    model: "openrouter/auto",
-    hint: "OpenRouter picks a capable model per request.",
-  },
-  {
-    label: "Quick edits",
-    model: "anthropic/claude-haiku-4.5",
-    hint: "Fast, non-reasoning — best for small copy tweaks.",
-  },
-  {
-    label: "Deep work",
-    model: "z-ai/glm-5.2-20260616, z-ai/glm-5.2",
-    hint: "Reasoning model for redesigns (pinned id, alias fallback).",
-  },
-];
-
-function friendlyError(code: string): string {
+function friendlyError(code: string, provider: HostedProvider): string {
+  const label = HOSTED_PROVIDERS[provider].label;
   switch (code) {
     case "encryption_unavailable":
       return "The server encryption key is not configured yet.";
     case "key_required":
-      return "Add an OpenRouter API key first.";
+      return `Add a ${label} API key first.`;
     case "invalid_key":
-      return "OpenRouter rejected that API key.";
+      return `${label} rejected that API key.`;
     case "invalid_model":
-      return "Use an OpenRouter model slug such as openrouter/auto.";
+      return provider === "openrouter"
+        ? "Use an OpenRouter model slug such as openrouter/auto."
+        : `Use a plain ${label} model id, e.g. ${HOSTED_PROVIDERS[provider].defaultModel}.`;
+    case "fallback_list_unsupported":
+      return `Comma-separated fallback lists only work with OpenRouter — enter one ${label} model id.`;
     case "model_not_capable":
-      return "That model must support tool calling for Canvas. Text-only models are fine: renders are inspected via the vision relay.";
+      return provider === "openrouter"
+        ? "That model must support tool calling for Canvas. Text-only models are fine: renders are inspected via the vision relay."
+        : `${label} does not serve that model id on this key. Pick a preset or check the id.`;
     case "openrouter_unavailable":
-      return "OpenRouter could not be reached. Try again in a moment.";
+    case "provider_unavailable":
+      return `${label} could not be reached. Try again in a moment.`;
     default:
-      return "The OpenRouter connection could not be saved.";
+      return "The API key could not be saved.";
   }
 }
 
@@ -74,6 +62,7 @@ export function OpenRouterManager({
   initial: OpenRouterSettingsView;
 }) {
   const [config, setConfig] = useState(initial);
+  const [provider, setProvider] = useState<HostedProvider>(initial.provider);
   const [apiKey, setApiKey] = useState("");
   const [modelId, setModelId] = useState(initial.modelId);
   const [defaultRuntime, setDefaultRuntime] = useState<Runtime>(
@@ -84,21 +73,40 @@ export function OpenRouterManager({
   const [saved, setSaved] = useState(false);
   const [isPending, startTransition] = useTransition();
 
+  const info = HOSTED_PROVIDERS[provider];
+
+  const switchProvider = (next: HostedProvider) => {
+    if (next === provider) return;
+    setProvider(next);
+    // A key belongs to one vendor: never carry the typed value across.
+    setApiKey("");
+    setShowKey(false);
+    setModelId(
+      config.configured && config.provider === next
+        ? config.modelId
+        : HOSTED_PROVIDERS[next].defaultModel,
+    );
+    setError(null);
+    setSaved(false);
+  };
+
   const save = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
     setSaved(false);
     startTransition(async () => {
       const result = await saveOpenRouterSettings({
+        provider,
         apiKey,
         modelId,
         defaultRuntime,
       });
       if (!result.ok) {
-        setError(friendlyError(result.error));
+        setError(friendlyError(result.error, provider));
         return;
       }
       setConfig(result.config);
+      setProvider(result.config.provider);
       setModelId(result.config.modelId);
       setDefaultRuntime(result.config.defaultRuntime);
       setApiKey("");
@@ -112,33 +120,37 @@ export function OpenRouterManager({
     startTransition(async () => {
       const result = await deleteOpenRouterSettings();
       if (!result.ok) {
-        setError("The OpenRouter connection could not be removed.");
+        setError("The API key could not be removed.");
         return;
       }
       setConfig({
         configured: false,
+        provider: "openrouter",
         encryptionReady: config.encryptionReady,
         keyHint: null,
         modelId: "openrouter/auto",
         defaultRuntime: "bridge",
         validatedAt: null,
       });
+      setProvider("openrouter");
       setModelId("openrouter/auto");
       setDefaultRuntime("bridge");
       setApiKey("");
     });
   };
 
+  const keyConfiguredForProvider = config.configured && config.provider === provider;
+
   return (
-    <section className="rounded-[12px] border border-border bg-card" aria-labelledby="openrouter-heading">
+    <section className="rounded-[12px] border border-border bg-card" aria-labelledby="hosted-key-heading">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
         <div className="flex min-w-0 items-start gap-3">
           <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-[9px] bg-[color:var(--accent-wash)] text-[color:var(--accent)]">
             <KeyRound aria-hidden className="size-4" />
           </span>
           <div>
-            <h2 id="openrouter-heading" className="text-sm font-semibold text-foreground">
-              OpenRouter API
+            <h2 id="hosted-key-heading" className="text-sm font-semibold text-foreground">
+              Hosted API key
             </h2>
             <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-muted-foreground">
               Use your own API key to run Canvas chat in the cloud when the
@@ -156,7 +168,7 @@ export function OpenRouterManager({
             }`}
           />
           {config.configured && config.encryptionReady
-            ? "Connected"
+            ? `Connected · ${HOSTED_PROVIDERS[config.provider].label}`
             : "Not configured"}
         </span>
       </div>
@@ -170,6 +182,28 @@ export function OpenRouterManager({
           </div>
         ) : null}
 
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-foreground">Provider</span>
+          <div className="flex flex-wrap gap-1" aria-label="Choose API provider">
+            {PROVIDER_ORDER.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                aria-pressed={provider === candidate}
+                onClick={() => switchProvider(candidate)}
+                disabled={isPending}
+                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                  provider === candidate
+                    ? "bg-foreground text-background"
+                    : "bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {HOSTED_PROVIDERS[candidate].label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="grid gap-4 lg:grid-cols-2">
           <label className="space-y-1.5">
             <span className="text-xs font-medium text-foreground">API key</span>
@@ -181,9 +215,9 @@ export function OpenRouterManager({
                 autoComplete="off"
                 spellCheck={false}
                 placeholder={
-                  config.configured
+                  keyConfiguredForProvider
                     ? `Connected as ${config.keyHint ?? "saved key"} — leave blank to keep it`
-                    : "sk-or-v1-…"
+                    : info.keyPlaceholder
                 }
                 disabled={!config.encryptionReady || isPending}
                 className="pr-10 font-mono"
@@ -201,12 +235,12 @@ export function OpenRouterManager({
             <span className="block text-[11px] text-muted-foreground">
               Create or revoke keys in{" "}
               <Link
-                href="https://openrouter.ai/settings/keys"
+                href={info.keyUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[color:var(--accent)] hover:underline"
               >
-                OpenRouter
+                {info.keyUrlLabel}
               </Link>
               . The full key is never shown again after save.
             </span>
@@ -217,13 +251,13 @@ export function OpenRouterManager({
             <Input
               value={modelId}
               onChange={(event) => setModelId(event.target.value)}
-              placeholder="openrouter/auto"
+              placeholder={info.defaultModel}
               disabled={!config.encryptionReady || isPending}
               spellCheck={false}
               className="font-mono"
             />
             <span className="flex flex-wrap gap-1.5 pt-0.5">
-              {MODEL_PRESETS.map((preset) => {
+              {info.presets.map((preset) => {
                 const active = modelId.trim() === preset.model;
                 return (
                   <button
@@ -244,9 +278,18 @@ export function OpenRouterManager({
               })}
             </span>
             <span className="block text-[11px] text-muted-foreground">
-              Pick a preset or type any OpenRouter model. Custom models must
-              support tools and image input. Use a comma-separated list to add
-              fallbacks (the first is primary).
+              {provider === "openrouter" ? (
+                <>
+                  Pick a preset or type any OpenRouter model. Custom models must
+                  support tools and image input. Use a comma-separated list to
+                  add fallbacks (the first is primary).
+                </>
+              ) : (
+                <>
+                  Pick a preset or type any {info.label} model id. The model
+                  must support tool calling.
+                </>
+              )}
             </span>
           </label>
         </div>
@@ -266,7 +309,7 @@ export function OpenRouterManager({
             <RuntimeChoice
               checked={defaultRuntime === "openrouter"}
               onChange={() => setDefaultRuntime("openrouter")}
-              title="OpenRouter"
+              title="Hosted API"
               description="Uses this personal API key from the Canvas server."
               disabled={!config.encryptionReady || isPending}
             />
@@ -284,7 +327,8 @@ export function OpenRouterManager({
               </span>
             ) : config.validatedAt ? (
               <span className="text-muted-foreground" suppressHydrationWarning>
-                {config.keyHint} · validated {relativeDate(config.validatedAt)}
+                {HOSTED_PROVIDERS[config.provider].label} · {config.keyHint} ·
+                validated {relativeDate(config.validatedAt)}
               </span>
             ) : null}
           </div>
@@ -305,9 +349,17 @@ export function OpenRouterManager({
             <Button
               type="submit"
               size="sm"
-              disabled={!config.encryptionReady || isPending || (!apiKey && !config.configured)}
+              disabled={
+                !config.encryptionReady ||
+                isPending ||
+                (!apiKey && !keyConfiguredForProvider)
+              }
             >
-              {isPending ? "Validating…" : config.configured ? "Save changes" : "Validate & save"}
+              {isPending
+                ? "Validating…"
+                : keyConfiguredForProvider
+                  ? "Save changes"
+                  : "Validate & save"}
             </Button>
           </div>
         </div>
@@ -354,4 +406,3 @@ function RuntimeChoice({
     </label>
   );
 }
-
