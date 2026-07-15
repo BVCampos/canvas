@@ -101,11 +101,25 @@ export type RasterizeOptions = {
   extraStyle?: string;
 };
 
+export type RasterShotMeta = {
+  /** The captured slide's own box in CSS px — NOT necessarily `size` (a deck
+   *  can mix slide sizes; assembling every shot into the first slide's box is
+   *  how off-size slides came out stretched). */
+  w: number;
+  h: number;
+  /** The slide's `data-canvas-position` value (the DB position assemble stamps),
+   *  so callers can join shots back to slide rows by position instead of by
+   *  array index — index joins silently shift when a section is skipped. */
+  position: number | null;
+};
+
 export type RasterizeResult = {
   /** The deck's native stage size, read off the first slide. */
   size: RasterStageSize;
-  /** One JPEG (as raw bytes) per slide, in document order. */
+  /** One JPEG (as raw bytes) per captured slide, in document order. */
   shots: Uint8Array[];
+  /** Per-shot geometry + position, index-aligned with `shots`. */
+  shotMeta: RasterShotMeta[];
 };
 
 export async function launchBrowser(): Promise<Browser> {
@@ -297,42 +311,139 @@ export async function rasterizeDeckHtml(
       );
     }
 
-    // The deck's true stage size, read off the first slide. `zoom`/transform
-    // scalers don't change computed width/height, so this is the design box
-    // (1920x1080 for the 21x kit) regardless of the current viewport.
-    const size = await page.evaluate((fallback) => {
-      const el = document.querySelector("[data-canvas-position]");
-      if (!el) return fallback;
-      const cs = getComputedStyle(el);
-      const w = Math.round(parseFloat(cs.width)) || fallback.w;
-      const h = Math.round(parseFloat(cs.height)) || fallback.h;
-      return { w, h };
-    }, FALLBACK);
+    // Strip the screen-only viewing aids BEFORE measuring. assemble stamps them
+    // so they're removable here: the viewport shim (style[data-canvas=
+    // "viewport-shim"]) rebinds `.slide` to 100vw×100vh so a fixed-px deck fits
+    // whatever screen it's on — at the capture's fallback viewport that squeezes
+    // the measured "native" size down to 1280×720 and (with the deck's own zoom
+    // pinned to 1 below) clips design-px content at the squeezed box. The
+    // EXPORT_FIT letterbox sizes .deck to one fitted slide with overflow:hidden
+    // — the clip that painted the white bands on dark slides. Both are screen
+    // aids; at capture the viewport IS the stage, so remove them and let the
+    // deck's own authored geometry lay out. (Their companion scripts stay but
+    // write only --slide-zoom/--cv-fit-* custom properties, which are inert once
+    // the consuming CSS is gone and `zoom` is pinned.)
+    await page.evaluate(() => {
+      document
+        .querySelectorAll('style[data-canvas="viewport-shim"], style[data-canvas="export-fit"]')
+        .forEach((el) => el.remove());
+    });
 
-    // Render each slide at its native size: viewport = stage (any screen-fit
-    // scaler resolves to 1x -> native), `zoom: 1` belt-and-suspenders, and hide
-    // the floating chrome (per-slide topstrip/footer are part of the slide and
-    // stay). Screen layout — NOT print — because print reflow is the bug.
-    await page.setViewport({ width: size.w, height: size.h, deviceScaleFactor: scale });
+    // Pin the frame the shots are taken in: `zoom: 1` (any screen-fit zoom
+    // resolves to native), no transforms or transitions on the structural
+    // containers (the deck's nav / CANVAS_CONTROLLER writes the carousel
+    // translate as an inline style, and a transition mid-flight tears the
+    // capture — a strip drifting during the shot loop screenshots blank
+    // background), no inter-slide margins, and no floating chrome (per-slide
+    // topstrip/footer are part of the slide and stay). Stylesheet !important
+    // outranks the inline style writes those scripts keep making. Screen
+    // layout — NOT print — because print reflow is the bug.
     await page.addStyleTag({
       content:
         ".slide,[data-canvas-position]{zoom:1 !important}" +
+        ".deck{position:static !important;width:auto !important;height:auto !important;overflow:visible !important}" +
+        ".deck,.slides,#slides{transform:none !important;transition:none !important}" +
+        // flex-shrink 0: a deck whose own strip is display:flex relied on the
+        // (now removed) viewport shim's `flex: 0 0 <basis>` to keep fixed-width
+        // slides from being squeezed into the viewport by default flex-shrink.
+        "[data-canvas-position]{margin:0 !important;transform:none !important;flex-shrink:0 !important}" +
         '.cv-chrome,.hint,#hint,.edit-hint,.deck-nav,.dots,[data-canvas="deck-chrome"]{display:none !important}' +
         (options.extraStyle ?? ""),
     });
 
+    // Top-level slide boxes (absolute page coords). Only TOP-LEVEL sections
+    // count: a stale `data-canvas-position` nested inside a slide's body (an
+    // exported deck pasted into a slide) must not become an extra page — a
+    // hidden one used to crash the whole export ("Node is either not visible").
+    const measureSections = () =>
+      page!.evaluate(() => {
+        return Array.from(document.querySelectorAll("[data-canvas-position]"))
+          .filter(
+            (el) => !(el.parentElement && el.parentElement.closest("[data-canvas-position]")),
+          )
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const raw = el.getAttribute("data-canvas-position");
+            const n = raw === null || raw === "" ? NaN : Number(raw);
+            return {
+              x: r.x + window.scrollX,
+              y: r.y + window.scrollY,
+              w: r.width,
+              h: r.height,
+              position: Number.isFinite(n) ? n : null,
+            };
+          });
+      });
+
+    // The deck's native stage size = the first visible slide's own box, now
+    // that every screen scaler is gone. Rects (not computed style) so the
+    // number is the box that actually paints.
+    const preSections = await measureSections();
+    const firstVisible = preSections.find((s) => s.w > 0.5 && s.h > 0.5);
+    const size = firstVisible
+      ? { w: Math.round(firstVisible.w), h: Math.round(firstVisible.h) }
+      : FALLBACK;
+
+    await page.setViewport({ width: size.w, height: size.h, deviceScaleFactor: scale });
+
+    // Let the resized frame settle before measuring the capture boxes: a
+    // viewport-relative layout reflows, and a font first demanded by the new
+    // layout (e.g. behind a min-width media query) starts loading only now —
+    // re-await fonts.ready (same bound as above; instant when nothing new
+    // loads), then two rAFs so layout and paint have run. The rAF wait is
+    // raced against a short timer because headless Chromium can throttle rAF
+    // on a non-foreground page (several render pages can be open at once
+    // under the gate) — a frame that never comes must not hang the render.
+    await page.evaluate(async (timeoutMs) => {
+      if (timeoutMs > 0) {
+        await Promise.race([
+          document.fonts.ready,
+          new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
+      }
+      // No named locals in this closure: bundlers that keep function names
+      // (tsx/esbuild running scripts against src) wrap them in a __name helper
+      // that doesn't exist in the page context. resolve() is idempotent, so
+      // whichever of the two paths fires first wins and the other no-ops.
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        setTimeout(resolve, 250);
+      });
+    }, FONT_READY_TIMEOUT_MS);
+
     if (options.onPageReady) await options.onPageReady(page);
 
-    const slides = await page.$$("[data-canvas-position]");
-    if (slides.length === 0) throw new Error("no slides to render");
+    // Final-frame measurement (the resize above can reflow), then screenshot
+    // each slide by EXPLICIT clip rather than ElementHandle.screenshot: the
+    // element path re-derives visibility and scroll state per shot (and hard-
+    // fails on a hidden node), while a clip of the composited page captures
+    // exactly the box we measured — beyond the viewport too (the carousel lays
+    // slides out in a strip wider than the stage).
+    const sections = await measureSections();
+    if (sections.length === 0) throw new Error("no slides to render");
     const shots: Uint8Array[] = [];
+    const shotMeta: RasterShotMeta[] = [];
     if (!options.skipShots) {
-      for (const el of slides) {
-        shots.push(await el.screenshot({ type: "jpeg", quality: jpegQuality }));
+      for (const s of sections) {
+        if (!(s.w > 0.5 && s.h > 0.5)) {
+          console.warn(
+            `[slide-raster] skipping zero-area slide at position ${s.position ?? "?"} — hidden at capture`,
+          );
+          continue;
+        }
+        shots.push(
+          await page.screenshot({
+            type: "jpeg",
+            quality: jpegQuality,
+            clip: { x: s.x, y: s.y, width: s.w, height: s.h },
+            captureBeyondViewport: true,
+          }),
+        );
+        shotMeta.push({ w: s.w, h: s.h, position: s.position });
       }
     }
 
-    return { size, shots };
+    return { size, shots, shotMeta };
   } finally {
     // Free the PAGE (its DOM + the decoded screenshots are the per-render memory
     // the caller's pure-JS assembly no longer needs) but keep the browser warm

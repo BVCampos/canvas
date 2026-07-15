@@ -167,8 +167,8 @@ export async function POST(request: NextRequest) {
   }
   if (!credential) {
     const message = undecryptable
-      ? "Your saved OpenRouter key couldn't be decrypted — it may have been stored under a different server key. Re-enter it in Connections."
-      : "OpenRouter is not connected. Add a personal API key in Connections, or ask a workspace admin to set a shared key.";
+      ? "Your saved API key couldn't be decrypted — it may have been stored under a different server key. Re-enter it in Connections."
+      : "No hosted API key is connected. Add a personal key in Connections, or ask a workspace admin to set a shared key.";
     await Promise.all([
       admin
         .from("canvas_assistant_message")
@@ -185,6 +185,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // The route path stays /api/assistant/openrouter/run for wire compat; the
+  // credential's provider decides which completion driver the runner uses.
+  const provider = credential.provider ?? "openrouter";
+
   logUsage({
     event: "assistant.openrouter.start",
     surface: "api",
@@ -192,7 +196,11 @@ export async function POST(request: NextRequest) {
     workspace_id: claimed.workspace_id as string,
     deck_id: claimed.deck_id as string,
     status: "ok",
-    props: { model_id: credential.modelId, key_source: credential.source },
+    props: {
+      provider,
+      model_id: credential.modelId,
+      key_source: credential.source,
+    },
   });
 
   const result = await runOpenRouterTurn({
@@ -205,6 +213,7 @@ export async function POST(request: NextRequest) {
     threadId: claimed.thread_id as string,
     apiKey: credential.apiKey,
     modelId: credential.modelId,
+    provider,
   });
 
   // Stamp the diagnostics on the event itself: prod errors used to log

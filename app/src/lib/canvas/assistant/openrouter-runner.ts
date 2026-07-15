@@ -11,8 +11,22 @@ import {
 import { CHAT_TOOL_DESCRIPTIONS } from "@/lib/canvas/assistant/chat-tool-descriptions";
 import { parseOpenRouterModels } from "@/lib/canvas/assistant/openrouter-client";
 import { modelAcceptsImageInput } from "@/lib/canvas/assistant/openrouter-catalog";
+import {
+  ProviderError,
+  type ChatToolDescriptor,
+  type CompletionDriver,
+  type CompletionRound,
+  type ImagePart,
+  type OpenRouterMessage,
+  type TextPart,
+} from "@/lib/canvas/assistant/completion-types";
+import {
+  openAiCompletionDriver,
+  openRouterCompletionDriver,
+} from "@/lib/canvas/assistant/openai-compat-driver";
+import { anthropicCompletionDriver } from "@/lib/canvas/assistant/anthropic-driver";
+import type { HostedProvider } from "@/lib/canvas/assistant/hosted-providers";
 
-const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_ROUNDS = 12;
 const MAX_HISTORY_MESSAGES = 48;
 const MAX_HISTORY_CHARS = 120_000;
@@ -87,29 +101,17 @@ const PARALLEL_SAFE_CHAT_TOOLS = new Set([
   "list_comments",
 ]);
 
-type TextPart = { type: "text"; text: string };
-type ImagePart = { type: "image_url"; image_url: { url: string } };
-type ToolCall = {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-};
-type OpenRouterMessage =
-  | { role: "system"; content: string | Array<Record<string, unknown>> }
-  | { role: "user"; content: string | Array<TextPart | ImagePart> }
-  | {
-      role: "assistant";
-      content: string | null;
-      tool_calls?: ToolCall[];
-    }
-  | { role: "tool"; content: string; tool_call_id: string; name?: string };
+// The message-space types (OpenRouterMessage, ToolCall, CompletionRound) and
+// ProviderError live in completion-types.ts, shared with the per-provider
+// completion drivers.
+type ToolCall = CompletionRound["toolCalls"][number];
 
-type CompletionRound = {
-  content: string;
-  reasoning: string;
-  toolCalls: ToolCall[];
-  model: string | null;
-  usage: Record<string, unknown> | null;
+// The completion call is the only provider-specific step of a turn; everything
+// else (rounds, tool execution, persistence, cancel checks) is shared.
+const COMPLETION_DRIVERS: Record<HostedProvider, CompletionDriver> = {
+  openrouter: openRouterCompletionDriver,
+  anthropic: anthropicCompletionDriver,
+  openai: openAiCompletionDriver,
 };
 
 type TurnInput = {
@@ -122,6 +124,9 @@ type TurnInput = {
   threadId: string;
   apiKey: string;
   modelId: string;
+  // Which hosted API vendor the key belongs to. Optional for wire compat with
+  // pre-BYOK callers; absent means the original OpenRouter path.
+  provider?: HostedProvider;
 };
 
 export type OpenRouterTurnResult =
@@ -139,21 +144,7 @@ export type OpenRouterTurnResult =
 
 class TurnCanceledError extends Error {}
 
-class ProviderError extends Error {
-  constructor(
-    public readonly userMessage: string,
-    public readonly status: number | null = null,
-    public readonly retryable: boolean = false,
-    // The provider refused image_url parts ("no endpoints support image
-    // input"). Deterministic — a same-model retry can never fix it; the round
-    // loop reroutes to the vision relay or strips the images instead.
-    public readonly imageInputRejected: boolean = false,
-  ) {
-    super(userMessage);
-  }
-}
-
-export const openRouterTools = toolDescriptors
+export const openRouterTools: ChatToolDescriptor[] = toolDescriptors
   .filter((descriptor) => !EXCLUDED_CHAT_TOOLS.has(descriptor.name))
   .map((descriptor) => ({
     type: "function" as const,
@@ -203,229 +194,6 @@ export function parseModelList(modelId: string): {
 } {
   const { primary, models } = parseOpenRouterModels(modelId);
   return { primary, models };
-}
-
-function providerErrorForStatus(status: number): string {
-  if (status === 401 || status === 403) {
-    return "OpenRouter rejected the saved API key. Reconnect it in Connections.";
-  }
-  if (status === 402) {
-    return "This OpenRouter account does not have enough credits for the request.";
-  }
-  if (status === 404) {
-    return "The selected OpenRouter model is no longer available. Choose another in Connections.";
-  }
-  if (status === 429) {
-    return "OpenRouter is rate-limiting this key. Wait a moment and retry.";
-  }
-  if (status >= 500) {
-    return "OpenRouter or its model provider is temporarily unavailable. Try again shortly.";
-  }
-  return "The selected OpenRouter model could not run this request. Check the model in Connections.";
-}
-
-// Transient provider failures worth one fresh attempt: routing flaps (404 on
-// an alias that just served a turn), rate-limit blips, provider 5xx, and
-// network-level failures. Auth/credit problems are stable — retrying only
-// doubles the pain.
-function retryableStatus(status: number): boolean {
-  return status === 404 || status === 408 || status === 429 || status >= 500;
-}
-
-function appendToolCallDelta(
-  calls: Map<number, ToolCall>,
-  raw: unknown,
-): void {
-  if (!raw || typeof raw !== "object") return;
-  const delta = raw as {
-    index?: unknown;
-    id?: unknown;
-    function?: { name?: unknown; arguments?: unknown };
-  };
-  const index = typeof delta.index === "number" ? delta.index : calls.size;
-  const existing = calls.get(index) ?? {
-    id: "",
-    type: "function" as const,
-    function: { name: "", arguments: "" },
-  };
-  if (typeof delta.id === "string") existing.id += delta.id;
-  if (typeof delta.function?.name === "string") {
-    existing.function.name += delta.function.name;
-  }
-  if (typeof delta.function?.arguments === "string") {
-    existing.function.arguments += delta.function.arguments;
-  }
-  calls.set(index, existing);
-}
-
-async function streamCompletion(input: {
-  apiKey: string;
-  modelId: string;
-  messages: OpenRouterMessage[];
-  signal: AbortSignal;
-  onText: (delta: string) => Promise<void>;
-  onReasoning: (delta: string) => Promise<void>;
-}): Promise<CompletionRound> {
-  const { primary, models } = parseModelList(input.modelId);
-  let response: Response;
-  try {
-    response = await fetch(OPENROUTER_CHAT_URL, {
-      method: "POST",
-      signal: input.signal,
-      headers: {
-        Authorization: `Bearer ${input.apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer":
-          process.env.NEXT_PUBLIC_APP_URL ?? "https://canvas.21xventures.com",
-        "X-OpenRouter-Title": "21x Canvas",
-      },
-      body: JSON.stringify({
-        model: primary,
-        ...(models.length > 1 ? { models } : {}),
-        messages: input.messages,
-        tools: openRouterTools,
-        tool_choice: "auto",
-        parallel_tool_calls: true,
-        stream: true,
-        temperature: 0.2,
-        max_tokens: 8192,
-      }),
-    });
-  } catch (error) {
-    // AbortError must keep flowing as a cancel, not be retried as a flap.
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ProviderError(
-      "OpenRouter could not be reached. Check connectivity and retry.",
-      null,
-      true,
-    );
-  }
-
-  if (!response.ok) {
-    // Read the body for the server logs — prod image-input 404s were
-    // undiagnosable with it discarded — but never surface raw provider
-    // details to the user (they may contain request fragments or account
-    // metadata).
-    const rawBody = await response.text().catch(() => "");
-    console.error(
-      "[openrouter:completion]",
-      primary,
-      response.status,
-      rawBody.slice(0, 500),
-    );
-    if (response.status === 404 && /image input/i.test(rawBody)) {
-      throw new ProviderError(
-        "The selected OpenRouter model cannot view rendered images. Choose a vision-capable model in Connections.",
-        response.status,
-        false,
-        true,
-      );
-    }
-    throw new ProviderError(
-      providerErrorForStatus(response.status),
-      response.status,
-      retryableStatus(response.status),
-    );
-  }
-  if (!response.body) {
-    throw new ProviderError(
-      "OpenRouter returned an empty response stream.",
-      null,
-      true,
-    );
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const toolCalls = new Map<number, ToolCall>();
-  let buffer = "";
-  let content = "";
-  let reasoning = "";
-  let model: string | null = null;
-  let usage: Record<string, unknown> | null = null;
-
-  const consumeLine = async (line: string) => {
-    if (!line.startsWith("data:")) return;
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") return;
-    let event: {
-      error?: unknown;
-      model?: unknown;
-      usage?: unknown;
-      choices?: Array<{
-        delta?: {
-          content?: unknown;
-          reasoning?: unknown;
-          reasoning_content?: unknown;
-          tool_calls?: unknown;
-        };
-      }>;
-    };
-    try {
-      event = JSON.parse(payload) as typeof event;
-    } catch {
-      return;
-    }
-    if (event.error) {
-      console.error(
-        "[openrouter:completion]",
-        primary,
-        "stream-error",
-        JSON.stringify(event.error).slice(0, 500),
-      );
-      throw new ProviderError(
-        "The OpenRouter model provider stopped the response. Try again or choose another model.",
-        null,
-        true,
-      );
-    }
-    if (typeof event.model === "string") model = event.model;
-    if (event.usage && typeof event.usage === "object") {
-      usage = event.usage as Record<string, unknown>;
-    }
-    const delta = event.choices?.[0]?.delta;
-    // Reasoning models stream their thinking as delta.reasoning (OpenRouter's
-    // normalized field; reasoning_content is the DeepSeek-style spelling some
-    // providers pass through). Dropping it left the panel dead for the whole
-    // reasoning phase — minutes on glm-5.2.
-    const reasoningDelta =
-      typeof delta?.reasoning === "string"
-        ? delta.reasoning
-        : typeof delta?.reasoning_content === "string"
-          ? delta.reasoning_content
-          : null;
-    if (reasoningDelta) {
-      reasoning += reasoningDelta;
-      await input.onReasoning(reasoningDelta);
-    }
-    if (typeof delta?.content === "string") {
-      content += delta.content;
-      await input.onText(delta.content);
-    }
-    if (Array.isArray(delta?.tool_calls)) {
-      for (const call of delta.tool_calls) appendToolCallDelta(toolCalls, call);
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) await consumeLine(line);
-    if (done) break;
-  }
-  if (buffer.trim()) await consumeLine(buffer.trim());
-
-  const completedCalls = [...toolCalls.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([, call], index) => ({
-      ...call,
-      id: call.id || `canvas_tool_${index}`,
-    }))
-    .filter((call) => call.function.name);
-
-  return { content, reasoning, toolCalls: completedCalls, model, usage };
 }
 
 function safeJson(value: unknown): string {
@@ -647,6 +415,8 @@ export async function runOpenRouterTurn(
   let providerModel: string | null = null;
   let roundNumber = 0;
   const providerUsage: Record<string, unknown> = {};
+  const provider: HostedProvider = input.provider ?? "openrouter";
+  const completionDriver = COMPLETION_DRIVERS[provider];
   const { primary: primaryModel } = parseModelList(input.modelId);
 
   // One catalog consultation per turn (the module caches across turns).
@@ -730,11 +500,18 @@ export async function runOpenRouterTurn(
       // Vision relay: a round that carries render images cannot run on a
       // text-only primary (OpenRouter 404s it deterministically), so it runs
       // on VISION_RELAY_MODEL instead. The relay inspects with the same tools
-      // available; the primary resumes once the images are consumed.
+      // available; the primary resumes once the images are consumed. The relay
+      // (and its catalog consultation) is an OpenRouter routing concept — the
+      // native anthropic/openai paths rely on the reactive strip-images
+      // fallback below as the safety net.
       const roundHasImages = messages.some(carriesImageParts);
       let roundModelId = input.modelId;
       let relayEngaged = false;
-      if (roundHasImages && (await primaryAcceptsImages()) === false) {
+      if (
+        provider === "openrouter" &&
+        roundHasImages &&
+        (await primaryAcceptsImages()) === false
+      ) {
         roundModelId = VISION_RELAY_MODEL;
         relayEngaged = true;
       }
@@ -743,10 +520,11 @@ export async function runOpenRouterTurn(
         const controller = new AbortController();
         cancelState.controller = controller;
         try {
-          return await streamCompletion({
+          return await completionDriver({
             apiKey: input.apiKey,
             modelId,
             messages,
+            tools: openRouterTools,
             signal: controller.signal,
             onText: async (delta) => {
               visibleContent += delta;
@@ -781,16 +559,16 @@ export async function runOpenRouterTurn(
           roundHasImages &&
           !cancelState.canceled
         ) {
-          if (!relayEngaged) {
+          if (provider === "openrouter" && !relayEngaged) {
             // The catalog believed this model takes images; the endpoint
             // disagreed. Rerun the round on the relay instead of replaying a
             // deterministic 404.
             roundModelId = VISION_RELAY_MODEL;
             relayEngaged = true;
           } else {
-            // Even the relay refused the images. Swap them for text traces
-            // and give the round back to the primary: the turn survives
-            // without vision.
+            // Even the relay refused the images (or the provider has no relay
+            // at all). Swap them for text traces and give the round back to
+            // the primary: the turn survives without vision.
             stripImageMessages(messages, IMAGE_UNDELIVERABLE_NOTE);
             roundModelId = input.modelId;
             relayEngaged = false;
@@ -820,7 +598,7 @@ export async function runOpenRouterTurn(
           // text as the reply instead.
           const salvage = round.reasoning.trim() || visibleReasoning.trim();
           if (!salvage) {
-            throw new ProviderError("The OpenRouter model returned no response.");
+            throw new ProviderError("The model returned no response.");
           }
           visibleContent = salvage;
           // The reply now IS the thinking text. Persist reasoning byte-identical
@@ -916,7 +694,7 @@ export async function runOpenRouterTurn(
     const safeMessage =
       error instanceof ProviderError
         ? error.userMessage
-        : "Canvas could not complete the OpenRouter turn. Try again.";
+        : "Canvas could not complete the assistant turn. Try again.";
     if (!(error instanceof ProviderError)) {
       console.error("[openrouter:turn]", error);
     }

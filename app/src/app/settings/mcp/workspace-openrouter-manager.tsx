@@ -7,36 +7,51 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { relativeDate } from "@/lib/utils";
 import {
+  HOSTED_PROVIDERS,
+  type HostedProvider,
+} from "@/lib/canvas/assistant/hosted-providers";
+import {
   deleteWorkspaceOpenRouterSettings,
   saveWorkspaceOpenRouterSettings,
 } from "./actions";
 
+const PROVIDER_ORDER: HostedProvider[] = ["openrouter", "anthropic", "openai"];
+
 export type WorkspaceOpenRouterView = {
   configured: boolean;
+  provider: HostedProvider;
   encryptionReady: boolean;
   keyHint: string | null;
   modelId: string;
   validatedAt: string | null;
 };
 
-function friendlyError(code: string): string {
+function friendlyError(code: string, provider: HostedProvider): string {
+  const label = HOSTED_PROVIDERS[provider].label;
   switch (code) {
     case "forbidden":
       return "Only a workspace owner or admin can set the shared key.";
     case "encryption_unavailable":
       return "The server encryption key is not configured yet.";
     case "key_required":
-      return "Add an OpenRouter API key first.";
+      return `Add a ${label} API key first.`;
     case "invalid_key":
-      return "OpenRouter rejected that API key.";
+      return `${label} rejected that API key.`;
     case "invalid_model":
-      return "Use an OpenRouter model slug such as openrouter/auto.";
+      return provider === "openrouter"
+        ? "Use an OpenRouter model slug such as openrouter/auto."
+        : `Use a plain ${label} model id, e.g. ${HOSTED_PROVIDERS[provider].defaultModel}.`;
+    case "fallback_list_unsupported":
+      return `Comma-separated fallback lists only work with OpenRouter — enter one ${label} model id.`;
     case "model_not_capable":
-      return "That model must support tool calling for Canvas. Text-only models are fine: renders are inspected via the vision relay.";
+      return provider === "openrouter"
+        ? "That model must support tool calling for Canvas. Text-only models are fine: renders are inspected via the vision relay."
+        : `${label} does not serve that model id on this key. Pick a preset or check the id.`;
     case "openrouter_unavailable":
-      return "OpenRouter could not be reached. Try again in a moment.";
+    case "provider_unavailable":
+      return `${label} could not be reached. Try again in a moment.`;
     default:
-      return "The workspace OpenRouter key could not be saved.";
+      return "The workspace API key could not be saved.";
   }
 }
 
@@ -48,6 +63,7 @@ export function WorkspaceOpenRouterManager({
   initial: WorkspaceOpenRouterView;
 }) {
   const [config, setConfig] = useState(initial);
+  const [provider, setProvider] = useState<HostedProvider>(initial.provider);
   const [apiKey, setApiKey] = useState("");
   const [modelId, setModelId] = useState(initial.modelId);
   const [showKey, setShowKey] = useState(false);
@@ -55,17 +71,38 @@ export function WorkspaceOpenRouterManager({
   const [saved, setSaved] = useState(false);
   const [isPending, startTransition] = useTransition();
 
+  const info = HOSTED_PROVIDERS[provider];
+
+  const switchProvider = (next: HostedProvider) => {
+    if (next === provider) return;
+    setProvider(next);
+    setApiKey("");
+    setShowKey(false);
+    setModelId(
+      config.configured && config.provider === next
+        ? config.modelId
+        : HOSTED_PROVIDERS[next].defaultModel,
+    );
+    setError(null);
+    setSaved(false);
+  };
+
   const save = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
     setSaved(false);
     startTransition(async () => {
-      const result = await saveWorkspaceOpenRouterSettings({ apiKey, modelId });
+      const result = await saveWorkspaceOpenRouterSettings({
+        provider,
+        apiKey,
+        modelId,
+      });
       if (!result.ok) {
-        setError(friendlyError(result.error));
+        setError(friendlyError(result.error, provider));
         return;
       }
       setConfig(result.config);
+      setProvider(result.config.provider);
       setModelId(result.config.modelId);
       setApiKey("");
       setSaved(true);
@@ -78,25 +115,29 @@ export function WorkspaceOpenRouterManager({
     startTransition(async () => {
       const result = await deleteWorkspaceOpenRouterSettings();
       if (!result.ok) {
-        setError("The workspace OpenRouter key could not be removed.");
+        setError("The workspace API key could not be removed.");
         return;
       }
       setConfig({
         configured: false,
+        provider: "openrouter",
         encryptionReady: config.encryptionReady,
         keyHint: null,
         modelId: "openrouter/auto",
         validatedAt: null,
       });
+      setProvider("openrouter");
       setModelId("openrouter/auto");
       setApiKey("");
     });
   };
 
+  const keyConfiguredForProvider = config.configured && config.provider === provider;
+
   return (
     <section
       className="rounded-[12px] border border-border bg-card"
-      aria-labelledby="workspace-openrouter-heading"
+      aria-labelledby="workspace-hosted-key-heading"
     >
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
         <div className="flex min-w-0 items-start gap-3">
@@ -105,10 +146,10 @@ export function WorkspaceOpenRouterManager({
           </span>
           <div>
             <h2
-              id="workspace-openrouter-heading"
+              id="workspace-hosted-key-heading"
               className="text-sm font-semibold text-foreground"
             >
-              Workspace OpenRouter key
+              Workspace API key
             </h2>
             <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-muted-foreground">
               A shared key every member of{" "}
@@ -127,7 +168,9 @@ export function WorkspaceOpenRouterManager({
                 : "bg-muted-foreground/40"
             }`}
           />
-          {config.configured && config.encryptionReady ? "Shared key set" : "Not set"}
+          {config.configured && config.encryptionReady
+            ? `Shared key set · ${HOSTED_PROVIDERS[config.provider].label}`
+            : "Not set"}
         </span>
       </div>
 
@@ -138,6 +181,28 @@ export function WorkspaceOpenRouterManager({
             to the server environment before saving a workspace key.
           </div>
         ) : null}
+
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-foreground">Provider</span>
+          <div className="flex flex-wrap gap-1" aria-label="Choose API provider">
+            {PROVIDER_ORDER.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                aria-pressed={provider === candidate}
+                onClick={() => switchProvider(candidate)}
+                disabled={isPending}
+                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                  provider === candidate
+                    ? "bg-foreground text-background"
+                    : "bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {HOSTED_PROVIDERS[candidate].label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
           <label className="space-y-1.5">
@@ -150,9 +215,9 @@ export function WorkspaceOpenRouterManager({
                 autoComplete="off"
                 spellCheck={false}
                 placeholder={
-                  config.configured
+                  keyConfiguredForProvider
                     ? `Shared key ${config.keyHint ?? "saved"} — leave blank to keep it`
-                    : "sk-or-v1-…"
+                    : info.keyPlaceholder
                 }
                 disabled={!config.encryptionReady || isPending}
                 className="pr-10 font-mono"
@@ -174,12 +239,12 @@ export function WorkspaceOpenRouterManager({
             <span className="block text-[11px] text-muted-foreground">
               Create or revoke keys in{" "}
               <Link
-                href="https://openrouter.ai/settings/keys"
+                href={info.keyUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[color:var(--accent)] hover:underline"
               >
-                OpenRouter
+                {info.keyUrlLabel}
               </Link>
               . The full key is never shown again after save.
             </span>
@@ -190,14 +255,46 @@ export function WorkspaceOpenRouterManager({
             <Input
               value={modelId}
               onChange={(event) => setModelId(event.target.value)}
-              placeholder="openrouter/auto"
+              placeholder={info.defaultModel}
               disabled={!config.encryptionReady || isPending}
               spellCheck={false}
               className="font-mono"
             />
+            <span className="flex flex-wrap gap-1.5 pt-0.5">
+              {info.presets.map((preset) => {
+                const active = modelId.trim() === preset.model;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setModelId(preset.model)}
+                    disabled={!config.encryptionReady || isPending}
+                    title={preset.hint}
+                    className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-55 ${
+                      active
+                        ? "border-[color:var(--accent)]/55 bg-[color:var(--accent-wash)] text-[color:var(--accent)]"
+                        : "border-border text-muted-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </span>
             <span className="block text-[11px] text-muted-foreground">
-              <code className="font-mono">openrouter/auto</code> is recommended.
-              Custom models must support tools and image input.
+              {provider === "openrouter" ? (
+                <>
+                  <code className="font-mono">openrouter/auto</code> is
+                  recommended. Custom models must support tools and image
+                  input. Use a comma-separated list to add fallbacks (the first
+                  is primary).
+                </>
+              ) : (
+                <>
+                  Pick a preset or type any {info.label} model id. The model
+                  must support tool calling.
+                </>
+              )}
             </span>
           </label>
         </div>
@@ -213,7 +310,8 @@ export function WorkspaceOpenRouterManager({
               </span>
             ) : config.validatedAt ? (
               <span className="text-muted-foreground" suppressHydrationWarning>
-                {config.keyHint} · validated {relativeDate(config.validatedAt)}
+                {HOSTED_PROVIDERS[config.provider].label} · {config.keyHint} ·
+                validated {relativeDate(config.validatedAt)}
               </span>
             ) : null}
           </div>
@@ -235,12 +333,14 @@ export function WorkspaceOpenRouterManager({
               type="submit"
               size="sm"
               disabled={
-                !config.encryptionReady || isPending || (!apiKey && !config.configured)
+                !config.encryptionReady ||
+                isPending ||
+                (!apiKey && !keyConfiguredForProvider)
               }
             >
               {isPending
                 ? "Validating…"
-                : config.configured
+                : keyConfiguredForProvider
                   ? "Save changes"
                   : "Validate & save"}
             </Button>

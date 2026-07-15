@@ -75,7 +75,7 @@ async function renderPptx(id: string, started: number): Promise<NextResponse> {
     // Headless Chromium launch + native-size per-slide screenshot loop. The
     // shared rasterizer closes the browser before it returns, so by the time we
     // assemble the .pptx the only memory live is the compressed JPEG bytes.
-    const { shots } = await rasterizeDeckHtml(result.html);
+    const { shots, shotMeta } = await rasterizeDeckHtml(result.html);
 
     const pptxDoc = new PptxGenJS();
     pptxDoc.defineLayout({ name: "CANVAS_16x9", width: SLIDE_W_IN, height: SLIDE_H_IN });
@@ -84,23 +84,41 @@ async function renderPptx(id: string, started: number): Promise<NextResponse> {
     // Properties pane and the slide navigator title.
     pptxDoc.title = result.title;
 
+    // Join notes/titles to shots BY POSITION (the raster stamps each shot with
+    // the data-canvas-position it captured). An index join silently shifts
+    // every note when the captured sections and the DB rows disagree.
+    const rowByPosition = new Map<number, { title: string; notes: string | null }>();
+    result.slidePositions.forEach((pos, i) => {
+      rowByPosition.set(pos, {
+        title: result.slideTitles[i] ?? "",
+        notes: result.slideNotes[i] ?? null,
+      });
+    });
+
     shots.forEach((shot, i) => {
       const slide = pptxDoc.addSlide();
-      // Full-bleed image: the JPEG IS the slide. base64 with a mime prefix is
-      // what pptxgenjs expects for inline image data (no temp file on disk).
+      // Contain-fit the JPEG in the 16:9 slide box, centered: a 16:9 shot
+      // (every kit deck) still fills edge-to-edge, but an off-ratio slide gets
+      // letterboxed instead of stretched into the wrong aspect.
+      const meta = shotMeta[i];
+      const ar = meta && meta.h > 0 ? meta.w / meta.h : SLIDE_W_IN / SLIDE_H_IN;
+      const boxAr = SLIDE_W_IN / SLIDE_H_IN;
+      const w = ar >= boxAr ? SLIDE_W_IN : SLIDE_H_IN * ar;
+      const h = ar >= boxAr ? SLIDE_W_IN / ar : SLIDE_H_IN;
       slide.addImage({
         data: `image/jpeg;base64,${Buffer.from(shot).toString("base64")}`,
-        x: 0,
-        y: 0,
-        w: SLIDE_W_IN,
-        h: SLIDE_H_IN,
+        x: (SLIDE_W_IN - w) / 2,
+        y: (SLIDE_H_IN - h) / 2,
+        w,
+        h,
       });
       // Speaker notes travel with the deliverable: the real talk track (0067)
       // when the slide has one; otherwise the Canvas slide title — the one
       // place a title stays searchable in PowerPoint (pptxgenjs 4.x has no
       // public slide-name API) — with a positional label as the last resort.
-      const notes = result.slideNotes[i]?.trim();
-      const title = result.slideTitles[i]?.trim();
+      const row = meta?.position != null ? rowByPosition.get(meta.position) : undefined;
+      const notes = row?.notes?.trim();
+      const title = row?.title?.trim();
       slide.addNotes(notes || title || `Slide ${i + 1}`);
     });
 

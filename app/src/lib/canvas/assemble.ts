@@ -556,7 +556,14 @@ ${CANVAS_CONTROLLER}
 function tagSection(html: string, position: number): string {
   const match = html.match(/^\s*<section\b((?:"[^"]*"|'[^']*'|[^>])*)>/i);
   if (match) {
-    const attrs = match[1] ?? "";
+    // Drop any stamp the section already carries (a slide round-tripped through
+    // export→import keeps its old data-canvas-position): HTML resolves duplicate
+    // attributes to the FIRST one, so appending ours after a stale stamp would
+    // silently lose — navigation and capture would key off the old position.
+    const attrs = (match[1] ?? "").replace(
+      /\s+data-canvas-position(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*))?/gi,
+      "",
+    );
     const replacement = `<section${attrs} data-canvas-position="${position}">`;
     return html.replace(match[0], replacement);
   }

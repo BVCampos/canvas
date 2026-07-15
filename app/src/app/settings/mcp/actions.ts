@@ -25,26 +25,73 @@ import {
   parseOpenRouterModels,
   validateOpenRouterAccess,
 } from "@/lib/canvas/assistant/openrouter-client";
+import {
+  isHostedProvider,
+  validateAnthropicAccess,
+  validateNativeModelSpec,
+  validateOpenAiAccess,
+  type HostedProvider,
+  type HostedValidationResult,
+} from "@/lib/canvas/assistant/hosted-providers";
 
 export type CreateTokenResult =
   | { ok: true; token: string; label: string | null }
   | { ok: false; error: string };
 
+export type HostedKeySettingsError =
+  | "encryption_unavailable"
+  | "key_required"
+  | "invalid_key"
+  | "invalid_model"
+  | "fallback_list_unsupported"
+  | "model_not_capable"
+  | "openrouter_unavailable"
+  | "provider_unavailable"
+  | "save_failed";
+
 export type OpenRouterSettingsResult =
   | { ok: true; config: OpenRouterConfigSummary }
-  | {
-      ok: false;
-      error:
-        | "encryption_unavailable"
-        | "key_required"
-        | "invalid_key"
-        | "invalid_model"
-        | "model_not_capable"
-        | "openrouter_unavailable"
-        | "save_failed";
+  | { ok: false; error: HostedKeySettingsError };
+
+type HostedModelValidation =
+  | { ok: true; storedModel: string; primaryModel: string }
+  | { ok: false; error: HostedKeySettingsError };
+
+// Model-spec rules + validator dispatch shared by the personal and workspace
+// save actions. OpenRouter keeps its comma-separated fallback-list grammar;
+// anthropic/openai take a single bare model id.
+function resolveHostedModelSpec(
+  provider: HostedProvider,
+  rawModelId: string,
+): HostedModelValidation {
+  if (provider === "openrouter") {
+    const modelSpec = parseOpenRouterModels(rawModelId).normalized.slice(0, 200);
+    if (!isValidOpenRouterModelSpec(modelSpec)) {
+      return { ok: false, error: "invalid_model" };
+    }
+    return {
+      ok: true,
+      storedModel: modelSpec,
+      primaryModel: parseOpenRouterModels(modelSpec).primary,
     };
+  }
+  const native = validateNativeModelSpec(rawModelId);
+  if (!native.ok) return { ok: false, error: native.error };
+  return { ok: true, storedModel: native.modelId, primaryModel: native.modelId };
+}
+
+async function validateHostedAccess(
+  provider: HostedProvider,
+  apiKey: string,
+  primaryModel: string,
+): Promise<HostedValidationResult | Awaited<ReturnType<typeof validateOpenRouterAccess>>> {
+  if (provider === "anthropic") return validateAnthropicAccess(apiKey, primaryModel);
+  if (provider === "openai") return validateOpenAiAccess(apiKey, primaryModel);
+  return validateOpenRouterAccess(apiKey, primaryModel);
+}
 
 export async function saveOpenRouterSettings(input: {
+  provider?: HostedProvider;
   apiKey: string;
   modelId: string;
   defaultRuntime: AssistantRuntime;
@@ -55,14 +102,14 @@ export async function saveOpenRouterSettings(input: {
     return { ok: false, error: "encryption_unavailable" };
   }
 
-  // Accept a comma-separated model list (primary + fallbacks). Validate the
-  // PRIMARY against OpenRouter, but persist the whole normalized list so the
-  // runner's fallback array survives.
-  const modelSpec = parseOpenRouterModels(input.modelId).normalized.slice(0, 200);
-  if (!isValidOpenRouterModelSpec(modelSpec)) {
-    return { ok: false, error: "invalid_model" };
-  }
-  const primaryModel = parseOpenRouterModels(modelSpec).primary;
+  const provider: HostedProvider = isHostedProvider(input.provider)
+    ? input.provider
+    : "openrouter";
+  // OpenRouter accepts a comma-separated model list (primary + fallbacks):
+  // the PRIMARY is validated, the whole normalized list persisted so the
+  // runner's fallback array survives. Anthropic/OpenAI take a single id.
+  const spec = resolveHostedModelSpec(provider, input.modelId);
+  if (!spec.ok) return { ok: false, error: spec.error };
   const defaultRuntime: AssistantRuntime =
     input.defaultRuntime === "openrouter" ? "openrouter" : "bridge";
 
@@ -71,19 +118,27 @@ export async function saveOpenRouterSettings(input: {
   try {
     if (!apiKey) {
       const existing = await getOpenRouterCredential(user.id);
-      if (!existing) return { ok: false, error: "key_required" };
+      // A saved key belongs to ONE vendor — switching provider requires a new
+      // key, never a silent reuse of the old one against a different API.
+      if (!existing || existing.provider !== provider) {
+        return { ok: false, error: "key_required" };
+      }
       apiKey = existing.apiKey;
     }
 
-    const validation = await validateOpenRouterAccess(apiKey, primaryModel);
+    const validation = await validateHostedAccess(provider, apiKey, spec.primaryModel);
     if (!validation.ok) return validation;
 
     // Store the full list when the user supplied fallbacks; a single model
     // stays exactly as validated.
     const storedModel =
-      parseOpenRouterModels(modelSpec).models.length > 1 ? modelSpec : validation.modelId;
+      provider === "openrouter" &&
+      parseOpenRouterModels(spec.storedModel).models.length > 1
+        ? spec.storedModel
+        : validation.modelId;
     await saveOpenRouterCredential({
       userId: user.id,
+      provider,
       apiKey,
       keyHint: validation.keyHint,
       modelId: storedModel,
@@ -99,6 +154,7 @@ export async function saveOpenRouterSettings(input: {
       status: "ok",
       duration_ms: Date.now() - started,
       props: {
+        provider,
         model_id: validation.modelId,
         default_runtime: defaultRuntime,
         replaced_key: Boolean(input.apiKey.trim()),
@@ -139,20 +195,10 @@ export async function deleteOpenRouterSettings(): Promise<{
 
 export type WorkspaceOpenRouterSettingsResult =
   | { ok: true; config: WorkspaceOpenRouterConfigSummary }
-  | {
-      ok: false;
-      error:
-        | "forbidden"
-        | "encryption_unavailable"
-        | "key_required"
-        | "invalid_key"
-        | "invalid_model"
-        | "model_not_capable"
-        | "openrouter_unavailable"
-        | "save_failed";
-    };
+  | { ok: false; error: "forbidden" | HostedKeySettingsError };
 
 export async function saveWorkspaceOpenRouterSettings(input: {
+  provider?: HostedProvider;
   apiKey: string;
   modelId: string;
 }): Promise<WorkspaceOpenRouterSettingsResult> {
@@ -165,29 +211,35 @@ export async function saveWorkspaceOpenRouterSettings(input: {
     return { ok: false, error: "encryption_unavailable" };
   }
 
-  const modelSpec = parseOpenRouterModels(input.modelId).normalized.slice(0, 200);
-  if (!isValidOpenRouterModelSpec(modelSpec)) {
-    return { ok: false, error: "invalid_model" };
-  }
-  const primaryModel = parseOpenRouterModels(modelSpec).primary;
+  const provider: HostedProvider = isHostedProvider(input.provider)
+    ? input.provider
+    : "openrouter";
+  const spec = resolveHostedModelSpec(provider, input.modelId);
+  if (!spec.ok) return { ok: false, error: spec.error };
 
   let apiKey = input.apiKey.trim();
   if (apiKey.length > 512) return { ok: false, error: "invalid_key" };
   try {
     if (!apiKey) {
       const existing = await getWorkspaceOpenRouterCredential(workspace.id);
-      if (!existing) return { ok: false, error: "key_required" };
+      if (!existing || existing.provider !== provider) {
+        return { ok: false, error: "key_required" };
+      }
       apiKey = existing.apiKey;
     }
 
-    const validation = await validateOpenRouterAccess(apiKey, primaryModel);
+    const validation = await validateHostedAccess(provider, apiKey, spec.primaryModel);
     if (!validation.ok) return validation;
 
     const storedModel =
-      parseOpenRouterModels(modelSpec).models.length > 1 ? modelSpec : validation.modelId;
+      provider === "openrouter" &&
+      parseOpenRouterModels(spec.storedModel).models.length > 1
+        ? spec.storedModel
+        : validation.modelId;
     await saveWorkspaceOpenRouterCredential({
       workspaceId: workspace.id,
       setBy: user.id,
+      provider,
       apiKey,
       keyHint: validation.keyHint,
       modelId: storedModel,
@@ -202,6 +254,7 @@ export async function saveWorkspaceOpenRouterSettings(input: {
       status: "ok",
       duration_ms: Date.now() - started,
       props: {
+        provider,
         model_id: validation.modelId,
         replaced_key: Boolean(input.apiKey.trim()),
       },

@@ -1,0 +1,32 @@
+<!-- Canvas-branded signup-confirmation email (GoTrue `confirmation`
+     template). NOTE: the magic-link flow (signInWithOtp) does NOT send
+     this — it sends magic_link even for brand-new users (verified against
+     local GoTrue). This template only fires on a real signUp() flow;
+     branded anyway so a future password path isn't bare. Local only:
+     wired via supabase/config.toml; prod templates live in the Supabase
+     dashboard (see README, "Auth email branding"). -->
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#f6f7f9;padding:32px 16px;">
+  <tr>
+    <td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:440px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:32px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr>
+          <td style="font-size:15px;font-weight:700;letter-spacing:0.02em;color:#111827;padding-bottom:20px;">Canvas</td>
+        </tr>
+        <tr>
+          <td style="font-size:20px;font-weight:600;color:#111827;padding-bottom:8px;">Welcome to Canvas</td>
+        </tr>
+        <tr>
+          <td style="font-size:14px;line-height:1.6;color:#4b5563;padding-bottom:24px;">Confirm your email to finish signing in. The link expires in 1&nbsp;hour and can be used once.</td>
+        </tr>
+        <tr>
+          <td>
+            <a href="{{ .ConfirmationURL }}" style="display:inline-block;background:#2563eb;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;padding:10px 22px;border-radius:8px;">Confirm and sign in</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="font-size:12px;line-height:1.6;color:#9ca3af;padding-top:24px;">If you didn&rsquo;t request this, you can safely ignore this email.<br>Canvas &mdash; multiplayer HTML decks, built with any agent.</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

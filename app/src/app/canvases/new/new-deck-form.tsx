@@ -38,7 +38,7 @@ export function NewDeckForm({
         <Input
           id="new-deck-title"
           type="text"
-          placeholder="Proposal name"
+          placeholder="e.g. 'Q3 board update' or 'Acme proposal'"
           name="title"
           value={title}
           onChange={(event) => setTitle(event.target.value)}

@@ -16,7 +16,7 @@ type FakePage = {
   setContent: () => Promise<void>;
   evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
   addStyleTag: () => Promise<void>;
-  $$: () => Promise<Array<{ screenshot: () => Promise<Uint8Array> }>>;
+  screenshot: () => Promise<Uint8Array>;
 };
 type FakeBrowser = {
   connected: boolean;
@@ -42,15 +42,18 @@ function makePage(): FakePage {
     },
     async setViewport() {},
     async setContent() {},
-    // Two evaluate calls per render: the fonts.ready race (called with a number
-    // timeout → return "settled") and the native-size read (called with the
-    // fallback object → return a stage size).
+    // Evaluate calls per render: the fonts.ready race and the post-resize
+    // settle (called with a number timeout → return "settled"), the screen-aid
+    // style removal (return ignored), and the two section measures (no arg →
+    // return one slide rect).
     async evaluate(_fn: unknown, arg: unknown) {
-      return typeof arg === "number" ? true : { w: 1920, h: 1080 };
+      return typeof arg === "number"
+        ? true
+        : [{ x: 0, y: 0, w: 1920, h: 1080, position: 0 }];
     },
     async addStyleTag() {},
-    async $$() {
-      return [{ async screenshot() { return new Uint8Array([1]); } }];
+    async screenshot() {
+      return new Uint8Array([1]);
     },
   };
 }

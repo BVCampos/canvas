@@ -86,8 +86,13 @@ export async function assembleSelfContainedDeck(
   const chromeHtml = typeof meta.chrome_html === "string" ? meta.chrome_html : null;
 
   // Collect every asset id mentioned in any text surface the export ships.
+  // nav_js counts too: a deck's nav script can reference assets (image
+  // preloads, per-slide background swaps), and an un-inlined reference stays an
+  // authenticated /api/canvas/asset URL — blank in the headless render, broken
+  // offline. Same family as the theme_css cover-image gap.
   const assetIds = collectAssetIds([
     deck.theme_css,
+    deck.nav_js,
     chromeHtml,
     ...slideRows.flatMap((s) => [s.html_body, s.slide_styles]),
   ]);
@@ -176,7 +181,7 @@ export async function assembleSelfContainedDeck(
   const html = assembleDeckHtml({
     title: deck.title,
     theme_css: themeWithFonts,
-    nav_js: deck.nav_js ?? "",
+    nav_js: inlineAssetRefs(deck.nav_js ?? "", dataUrlByAssetId),
     meta: inlinedMeta,
     slides: inlinedSlides,
     mode: "export",
@@ -205,6 +210,13 @@ export type DeckExportSuccess = {
    * field so the talk track travels with the deliverable.
    */
   slideNotes: (string | null)[];
+  /**
+   * Ordered slide positions, aligned with slideTitles/slideNotes. The raster
+   * stamps each shot with the position it captured (RasterShotMeta), so the
+   * PPTX route joins notes to shots BY POSITION — an index join silently
+   * shifts every note when the DOM grows or loses a section.
+   */
+  slidePositions: number[];
 };
 
 export type DeckExportFailure = {
@@ -314,6 +326,7 @@ export async function buildDeckExportHtml(
     slideNotes: slideRows.map(
       (s) => ((s as { speaker_notes?: string | null }).speaker_notes ?? null),
     ),
+    slidePositions: slideRows.map((s) => s.position as number),
   };
 }
 

@@ -60,12 +60,22 @@ function fakeClient(rows: {
 describe("getOpenRouterCredential — personal-first, workspace-fallback", () => {
   it("returns the personal key when the user has one", async () => {
     const c = await getOpenRouterCredential("u1", "w1", fakeClient({ user: USER_ROW, workspace: WS_ROW }));
-    expect(c).toEqual({ apiKey: "USER_KEY", modelId: "user/model", source: "user" });
+    expect(c).toEqual({
+      apiKey: "USER_KEY",
+      modelId: "user/model",
+      provider: "openrouter",
+      source: "user",
+    });
   });
 
   it("falls back to the workspace key when the user has none", async () => {
     const c = await getOpenRouterCredential("u1", "w1", fakeClient({ workspace: WS_ROW }));
-    expect(c).toEqual({ apiKey: "WORKSPACE_KEY", modelId: "ws/model", source: "workspace" });
+    expect(c).toEqual({
+      apiKey: "WORKSPACE_KEY",
+      modelId: "ws/model",
+      provider: "openrouter",
+      source: "workspace",
+    });
   });
 
   it("does not use the workspace key without a workspace id", async () => {

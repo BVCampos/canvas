@@ -25,8 +25,45 @@ export const GITHUB_REPO_URL = "https://github.com/BVCampos/canvas";
 
 export const RELEASES: Release[] = [
   {
+    date: "2026-07-13",
+    title: "Import and export fixes",
+    items: [
+      {
+        title: "PDF and PowerPoint exports capture every deck faithfully",
+        description:
+          "Export was tuned for the standard deck shape and quietly mangled everything else: slides of a different size came out stretched, decks that scale themselves could export cropped or with the wrong slide on a page, a hidden leftover element could fail the whole export, and speaker notes could land on the wrong PowerPoint slide. Each slide now exports at its own true size with its own notes.",
+        tag: "fix",
+      },
+      {
+        title: "Dark slides export without white bands",
+        description:
+          "PDF export painted a thin white band along the edges of dark slides — the on-screen letterbox was clipping the capture. Exports are edge-to-edge again.",
+        tag: "fix",
+        prs: [87],
+      },
+      {
+        title: "Import accepts decks with embedded TTF/OTF fonts",
+        description:
+          "Uploading a deck whose HTML embeds a TTF or OTF font (or a BMP/ICO image) failed with a generic import error — the parser extracted the font but storage refused the file type. Those decks now import cleanly.",
+        tag: "fix",
+      },
+    ],
+  },
+  {
+    date: "2026-07-08",
+    title: "Bring your own key",
+    items: [
+      {
+        title: "Anthropic and OpenAI keys in Canvas chat",
+        description:
+          "The hosted Canvas chat now takes your own Anthropic or OpenAI API key, not just OpenRouter. Pick the provider in Settings → Connections, paste the key, and in-deck chat runs on Claude or GPT models directly — same propose-first tools, keys encrypted before storage.",
+        tag: "feature",
+      },
+    ],
+  },
+  {
     date: "2026-07-07",
-    title: "Resize on the slide + small-screen fit",
+    title: "Resize, small-screen fit, and clearer onboarding",
     items: [
       {
         title: "Resize elements right on the slide",
@@ -40,6 +77,20 @@ export const RELEASES: Release[] = [
           "Fixed-size decks that don't scale themselves now shrink to fit the window everywhere (the editor, Present, share links, and exported files) instead of scrambling on laptops and smaller displays.",
         tag: "fix",
         prs: [80],
+      },
+      {
+        title: "Connections page leads with your agent",
+        description:
+          "Creating an access token is now the first thing on the Connections page, with the two setup paths named in plain language (work from your terminal, or chat inside Canvas) and a live check that flips green the moment your agent first connects. OpenRouter keys moved into a collapsed Advanced section.",
+        tag: "improvement",
+        prs: [81],
+      },
+      {
+        title: "First-run guide on the deck list",
+        description:
+          "An empty workspace now walks you through the loop in order (connect your agent, create a deck, ask for edits) and connects your agent right on the page: token, setup command, and live check, with no detour to Settings. The topbar keeps a Connect your agent shortcut until one connects.",
+        tag: "improvement",
+        prs: [81],
       },
     ],
   },

@@ -67,23 +67,13 @@ export default async function McpSettingsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Connections</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Connect any MCP-compatible agent, run a local agent behind Canvas
-          chat, or use your personal OpenRouter key. MCP access tokens are
-          scoped to{" "}
+          Canvas has no built-in AI — it connects to an agent you run. Create
+          an access token, add Canvas to Claude Code or Codex, and its edits
+          arrive here as proposals you review. Tokens are scoped to{" "}
           <strong className="font-medium text-foreground">{workspace.name}</strong>
-          . OpenRouter keys are encrypted before storage and never returned to
-          the browser after you save them.
+          .
         </p>
       </div>
-
-      <OpenRouterManager initial={openRouterConfig} />
-
-      {canManageWorkspaceKey && workspaceOpenRouter ? (
-        <WorkspaceOpenRouterManager
-          workspaceName={workspace.name}
-          initial={workspaceOpenRouter}
-        />
-      ) : null}
 
       <McpTokenManager
         tokens={tokens}
@@ -116,6 +106,41 @@ export default async function McpSettingsPage() {
           <li>• Browse version history and read prior versions.</li>
         </ul>
       </div>
+
+      {/* The hosted API key is the alternative path (hosted model instead of
+          a local agent), so it lives collapsed below the core token flow —
+          new users land on the token, not on an API-key form. */}
+      <details className="group">
+        <summary className="cursor-pointer list-none rounded-[12px] border border-border bg-card px-6 py-4 transition-colors hover:border-[color:var(--accent)]/40 [&::-webkit-details-marker]:hidden">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="eyebrow">Advanced · Hosted API runtime</div>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Prefer not to run a local agent? Add an OpenRouter, Anthropic,
+                or OpenAI API key and the in-deck Canvas chat runs on a hosted
+                model instead. Keys are encrypted before storage and never
+                returned to the browser.
+              </p>
+            </div>
+            <span
+              className="shrink-0 text-xs text-muted-foreground transition-transform group-open:rotate-180"
+              aria-hidden
+            >
+              ▾
+            </span>
+          </div>
+        </summary>
+        <div className="mt-4 space-y-6">
+          <OpenRouterManager initial={openRouterConfig} />
+
+          {canManageWorkspaceKey && workspaceOpenRouter ? (
+            <WorkspaceOpenRouterManager
+              workspaceName={workspace.name}
+              initial={workspaceOpenRouter}
+            />
+          ) : null}
+        </div>
+      </details>
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-border bg-card p-6">
         <p className="text-sm text-muted-foreground">

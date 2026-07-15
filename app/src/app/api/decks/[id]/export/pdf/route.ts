@@ -99,7 +99,7 @@ async function renderPdf(id: string, started: number): Promise<NextResponse> {
     // Headless Chromium launch + native-size per-slide screenshot loop. The
     // shared rasterizer closes the browser before it returns, so by the time we
     // assemble the PDF the only memory live is the compressed JPEG bytes.
-    const { size, shots } = await rasterizeDeckHtml(result.html);
+    const { size, shots, shotMeta } = await rasterizeDeckHtml(result.html);
 
     // Assemble with pdf-lib (pure JS) instead of a second Chromium page.
     //   The previous approach loaded all the slide JPEGs back into a fresh
@@ -112,10 +112,15 @@ async function renderPdf(id: string, started: number): Promise<NextResponse> {
     //   decodes them, so memory stays flat and there's no second render to
     //   mis-reflow. One image per page, page box = the native stage size.
     const doc = await PDFDocument.create();
-    for (const shot of shots) {
-      const img = await doc.embedJpg(shot);
-      const pg = doc.addPage([size.w, size.h]);
-      pg.drawImage(img, { x: 0, y: 0, width: size.w, height: size.h });
+    for (let i = 0; i < shots.length; i++) {
+      const img = await doc.embedJpg(shots[i]);
+      // Page box = THAT slide's own box, not the first slide's: a deck can mix
+      // slide sizes, and forcing every image into one box stretched the
+      // off-size ones. Fall back to the stage size if meta is missing.
+      const w = shotMeta[i]?.w || size.w;
+      const h = shotMeta[i]?.h || size.h;
+      const pg = doc.addPage([w, h]);
+      pg.drawImage(img, { x: 0, y: 0, width: w, height: h });
     }
     pdf = await doc.save();
   } catch (err) {
