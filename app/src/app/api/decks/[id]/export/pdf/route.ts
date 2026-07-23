@@ -51,7 +51,11 @@ import { PDFDocument } from "pdf-lib";
 import { buildDeckExportHtml, sanitizeFilename } from "@/lib/canvas/export-deck";
 import { logUsage } from "@/lib/usage/log";
 import { renderGate } from "@/lib/canvas/render-gate";
-import { rasterizeDeckHtml } from "@/lib/canvas/slide-raster";
+import {
+  rasterizeDeckHtml,
+  EXPORT_DOC_SCALE,
+  EXPORT_DOC_JPEG_QUALITY,
+} from "@/lib/canvas/slide-raster";
 
 // Headless Chromium boot + render of a many-slide deck can take a while;
 // the Vercel default (10s on some plans) is not enough.
@@ -99,7 +103,13 @@ async function renderPdf(id: string, started: number): Promise<NextResponse> {
     // Headless Chromium launch + native-size per-slide screenshot loop. The
     // shared rasterizer closes the browser before it returns, so by the time we
     // assemble the PDF the only memory live is the compressed JPEG bytes.
-    const { size, shots, shotMeta } = await rasterizeDeckHtml(result.html);
+    // Capture at the document-export resolution (1.5×/q80 by default) rather than
+    // the rasterizer's 2×/q90 single-preview default: multiplied across a whole
+    // deck that 2× is what made the PDF ~6MB. See EXPORT_DOC_* in slide-raster.
+    const { size, shots, shotMeta } = await rasterizeDeckHtml(result.html, {
+      scale: EXPORT_DOC_SCALE,
+      jpegQuality: EXPORT_DOC_JPEG_QUALITY,
+    });
 
     // Assemble with pdf-lib (pure JS) instead of a second Chromium page.
     //   The previous approach loaded all the slide JPEGs back into a fresh

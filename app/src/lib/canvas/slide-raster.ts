@@ -44,6 +44,16 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// Positive float env knob (e.g. a deviceScaleFactor of 1.5), or the fallback
+// when unset/blank/garbage. Zero is rejected — a scale of 0 has no meaning and
+// would collapse the capture — so this is strictly > 0, unlike envInt.
+function envFloat(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 // How long we wait for `document.fonts.ready` before capturing anyway. The
 // export/render HTML inlines web fonts as data: URLs (export-deck), so fonts
 // normally settle in a few ms with no network. But inlining is best-effort — a
@@ -71,6 +81,21 @@ const RENDER_BROWSER_MAX_RENDERS = envInt("RENDER_BROWSER_MAX_RENDERS", 40);
 const FALLBACK = { w: 1280, h: 720 };
 const DEFAULT_SCALE = 2;
 const DEFAULT_JPEG_QUALITY = 90;
+
+// Capture resolution for the whole-deck DOCUMENT exports (PDF, PPTX). The deck
+// stage is a fixed 1920×1080 and is presented/printed at 1080p, so the 2×
+// default (3840×2160 JPEGs — right for a single crisp MCP/thumbnail preview,
+// where bytes are trivial) is pure oversampling once multiplied across a 12-slide
+// file: on the 21x institutional deck that default produced a 6.21MB PDF, which
+// users flagged as too large. 1.25× (2400×1350) still supersamples — above the
+// native 1080p, so text and thin SVG strokes stay crisp on a retina/4K projector
+// — while cutting pixel count to ~39%; quality 78 on the kit's flat vector art
+// is visually lossless (verified: no artifacts on the dark case-divider's navy
+// gradient) and shaves the rest. Measured end-to-end on that deck: 6.21MB → 2.32MB
+// (−63%). Both are env-tunable so a one-off max-res export needs no redeploy
+// (EXPORT_DOC_SCALE=2 EXPORT_DOC_JPEG_QUALITY=92 restores the original size).
+export const EXPORT_DOC_SCALE = envFloat("EXPORT_DOC_SCALE", 1.25);
+export const EXPORT_DOC_JPEG_QUALITY = envInt("EXPORT_DOC_JPEG_QUALITY", 78);
 
 export type RasterStageSize = { w: number; h: number };
 
