@@ -25,7 +25,11 @@ import PptxGenJS from "pptxgenjs";
 import { buildDeckExportHtml, sanitizeFilename } from "@/lib/canvas/export-deck";
 import { logUsage } from "@/lib/usage/log";
 import { renderGate } from "@/lib/canvas/render-gate";
-import { rasterizeDeckHtml } from "@/lib/canvas/slide-raster";
+import {
+  rasterizeDeckHtml,
+  EXPORT_DOC_SCALE,
+  EXPORT_DOC_JPEG_QUALITY,
+} from "@/lib/canvas/slide-raster";
 
 // Headless Chromium boot + render of a many-slide deck can take a while.
 export const maxDuration = 60;
@@ -75,7 +79,12 @@ async function renderPptx(id: string, started: number): Promise<NextResponse> {
     // Headless Chromium launch + native-size per-slide screenshot loop. The
     // shared rasterizer closes the browser before it returns, so by the time we
     // assemble the .pptx the only memory live is the compressed JPEG bytes.
-    const { shots, shotMeta } = await rasterizeDeckHtml(result.html);
+    // Same document-export resolution as the PDF route (1.5×/q80 default) — the
+    // 2× single-preview default bloated the .pptx the same way. See EXPORT_DOC_*.
+    const { shots, shotMeta } = await rasterizeDeckHtml(result.html, {
+      scale: EXPORT_DOC_SCALE,
+      jpegQuality: EXPORT_DOC_JPEG_QUALITY,
+    });
 
     const pptxDoc = new PptxGenJS();
     pptxDoc.defineLayout({ name: "CANVAS_16x9", width: SLIDE_W_IN, height: SLIDE_H_IN });

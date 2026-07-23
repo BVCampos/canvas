@@ -32,16 +32,18 @@ import { MenuSurface } from "@/components/ui/menu-surface";
 // the deck's CANVAS_CONTROLLER translates the strip by N*100vw, so the iframe's
 // own viewport IS the scaling stage — no transform math.
 //
-// Aspect handling: on a landscape/desktop viewport the iframe is full-bleed, so
-// its viewport ≈ the slide's native 16:9 and slides fill the screen. On a
-// PORTRAIT phone a full-bleed iframe is ~9:19 tall, which crushes 16:9-authored
-// slides — classic decks shrink to a tiny self-letterboxed band with big empty
-// margins, doc-style decks overflow and overlap. So in portrait we constrain the
-// iframe to a width-filling 16:9 box and centre it, letting the dark backdrop
-// paint the letterbox bars above/below. The deck inside then sees a 16:9 viewport
-// and renders at its intended proportions, just scaled to the phone's width. This
-// mirrors the editor preview, which already switches to a centred `aspect-video`
-// box below `xl` (deck-workspace.tsx).
+// Aspect handling: the deck's nav.js scales slides by CSS `zoom =
+// innerWidth/1920` — WIDTH-fit only. A full-bleed iframe therefore only renders
+// the slide whole when the viewport happens to be ~16:9: WIDER than that clips
+// the bottom (the "página com zoom enorme" report — the slide looks over-zoomed
+// with its lower rows cut off on a wide monitor), and a PORTRAIT phone
+// (~9:19 tall) crushes it into a tiny self-letterboxed band. So we don't
+// full-bleed the iframe — we wrap it in `.deck-fit-box`, a centred box that
+// fits the viewport on BOTH axes at the deck's aspect (default 16:9). The dark
+// backdrop then paints the letterbox (top/bottom) or pillarbox (left/right)
+// bars, and the deck — width-filling that box — renders whole at every window
+// shape. (The editor preview in deck-workspace.tsx has the same width-fit model
+// but its own pane host; it still full-bleeds at xl — a separate follow-up.)
 //
 // Navigation reuses the exact postMessage protocol the editor exercises in
 // production (assemble.ts):
@@ -461,40 +463,42 @@ export function DeckViewer({
     <div
       className={cn(
         // Always-dark backdrop (navy-glow is deep in both themes). It shows
-        // behind the loading cover and, in portrait, paints the letterbox bars
-        // around the centred 16:9 iframe (see the iframe's portrait classes).
-        // flex centring only affects the in-flow iframe; the swipe layer, cover,
-        // and chrome are all absolutely positioned and still cover the viewport.
-        "fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-[color:var(--navy-glow)]",
+        // behind the loading cover and paints the letterbox / pillarbox bars
+        // around the centred fit box (deck-fit-box below). flex centring only
+        // affects the in-flow fit box; the swipe layer, cover, and chrome are
+        // all absolutely positioned and still cover the viewport.
+        // deck-fit-stage makes this the size-query container the fit box reads.
+        "deck-fit-stage fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-[color:var(--navy-glow)]",
         !chromeVisible && "cursor-none",
       )}
     >
-      <iframe
-        ref={iframeRef}
-        src={previewSrc}
-        // SECURITY: untrusted deck HTML. allow-scripts WITHOUT allow-same-origin
-        // keeps deck nav working while denying access to the app's cookies /
-        // origin. The postMessage protocol validates by event.source, not
-        // origin. Mirrors deck-workspace.tsx — do NOT add allow-same-origin.
-        sandbox="allow-scripts"
-        title={`${title} — slides`}
-        // Landscape/desktop: full-bleed (h-full w-full) — the iframe viewport is
-        // ~16:9 so slides fill the screen, unchanged. Portrait: a width-filling
-        // 16:9 box (aspect-video w-full) centred by the parent flex, so the deck
-        // renders at its intended proportions and the dark backdrop letterboxes
-        // above/below instead of the slide squishing. max-h-full guards the rare
-        // portrait viewport tall enough that 16:9-by-width would still overflow.
-        className="h-full w-full border-0 bg-white portrait:h-auto portrait:max-h-full portrait:w-full portrait:aspect-video"
-        onLoad={() => {
-          // Don't clear the cover here — onLoad fires for error bodies (e.g. a
-          // cold 503) too, which would flash the error page. We clear it on the
-          // deck's first canvas:state instead. Just (re)assert the position.
-          iframeRef.current?.contentWindow?.postMessage(
-            { type: "canvas:navigate", position },
-            "*",
-          );
-        }}
-      />
+      {/* Fit-both box: sizes the deck to the viewport on BOTH axes (see
+       * .deck-fit-box) so a viewport wider OR taller than 16:9 letterboxes
+       * instead of cropping the slide — the "zoom enorme / slide cut off"
+       * report on wide monitors. The deck width-fills this box exactly, so it
+       * renders whole at every window shape. */}
+      <div className="deck-fit-box">
+        <iframe
+          ref={iframeRef}
+          src={previewSrc}
+          // SECURITY: untrusted deck HTML. allow-scripts WITHOUT allow-same-origin
+          // keeps deck nav working while denying access to the app's cookies /
+          // origin. The postMessage protocol validates by event.source, not
+          // origin. Mirrors deck-workspace.tsx — do NOT add allow-same-origin.
+          sandbox="allow-scripts"
+          title={`${title} — slides`}
+          className="block h-full w-full border-0 bg-white"
+          onLoad={() => {
+            // Don't clear the cover here — onLoad fires for error bodies (e.g. a
+            // cold 503) too, which would flash the error page. We clear it on the
+            // deck's first canvas:state instead. Just (re)assert the position.
+            iframeRef.current?.contentWindow?.postMessage(
+              { type: "canvas:navigate", position },
+              "*",
+            );
+          }}
+        />
+      </div>
 
       {/* Transparent swipe-capture layer (mobile). Sits ABOVE the iframe but
        * BELOW the chrome overlay (z-[4]) and cold-start cover (z-[3]) so taps

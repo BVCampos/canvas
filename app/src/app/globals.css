@@ -302,6 +302,32 @@ body {
   overflow: hidden;
 }
 
+/* Deck fit-both letterbox.
+ *
+ * Slides are authored at a fixed design aspect (kit decks are 1920×1080) and
+ * their nav.js scales by CSS `zoom = innerWidth / designWidth` — WIDTH-fit only.
+ * When the host box is WIDER than the deck's aspect, width-fit renders the slide
+ * taller than the box and the bottom is clipped (the "página com zoom enorme"
+ * report — the deck looks over-zoomed with its lower rows cut off). Full-bleed
+ * hosts only got away with it while the box happened to be ~16:9.
+ *
+ * `.deck-fit-box` is a centred box that fits its container on BOTH axes, so a
+ * container of any aspect letterboxes (bars top/bottom) or pillarboxes (bars
+ * left/right) instead of cropping — the slide always renders whole. It needs an
+ * ancestor sized as a query container (`.deck-fit-stage`, i.e. container-type:
+ * size). Default aspect 16:9; override per deck via --deck-ar-w / --deck-ar-h.
+ * The iframe inside fills this box 1:1, so any host that maps pointer geometry
+ * against the iframe rect (the editor's click-to-edit) stays correct. */
+.deck-fit-stage {
+  container-type: size;
+}
+.deck-fit-box {
+  --deck-ar-w: 16;
+  --deck-ar-h: 9;
+  width: min(100cqw, calc(100cqh * var(--deck-ar-w) / var(--deck-ar-h)));
+  height: min(100cqh, calc(100cqw * var(--deck-ar-h) / var(--deck-ar-w)));
+}
+
 /* Copper hairline activity indicator.
  * Sits at the very top edge of the slide preview frame.
  * Drive states from the consuming component via [data-activity="…"]. */
